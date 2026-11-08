@@ -42,3 +42,13 @@ export const ALLOWANCE_COLUMNS = ['allowance_date', 'amount', 'driver_name', 'tr
 
 export const DRIVER_COLUMNS = ['name', 'phone', 'id_number', 'license_number', 'nssf_number', 'sha_number', 'status'];
 export const VEHICLE_COLUMNS = ['plate_number', 'make', 'model', 'year', 'status'];
+
+// Reports & Costs. Each list follows the "Add" form of its tab, in the same order.
+// Revenue form: Month, Truck, Revenue, Notes. (Sub-account comes from the truck.)
+export const REVENUE_COLUMNS = ['month', 'truck_plate', 'amount', 'notes'];
+// Insurance, Loans & Allowance grid: Month, then one row per truck with the three figures.
+export const TRUCK_COST_COLUMNS = ['month', 'truck_plate', 'insurance', 'loan', 'driver_allowance'];
+// Financial / Employment / Overhead / Miscellaneous form: Month, Category, Truck (blank = whole sub-account), Amount, Notes.
+export const COST_ENTRY_COLUMNS = ['month', 'category', 'truck_plate', 'amount', 'notes'];
+// Driver salary form (Employment tab): Month, Driver, Truck, Salary, Notes.
+export const SALARY_COLUMNS = ['month', 'driver_name', 'truck_plate', 'amount', 'notes'];
