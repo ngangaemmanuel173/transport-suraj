@@ -2,6 +2,7 @@ import { TYRE_TEMPLATE_COLUMNS } from '@/lib/tyreTemplate';
 import {
   CSL_TRIP_COLUMNS, LONG_TRIP_COLUMNS, FUEL_COLUMNS, TALLY_COLUMNS, CONTAINER_COLUMNS,
   VEHICLE_COMPLIANCE_COLUMNS, DRIVER_COMPLIANCE_COLUMNS, DRIVER_COLUMNS, VEHICLE_COLUMNS, ALLOWANCE_COLUMNS,
+  REVENUE_COLUMNS, TRUCK_COST_COLUMNS, COST_ENTRY_COLUMNS, SALARY_COLUMNS,
 } from '@/lib/importColumns';
 
 export type TemplateName =
@@ -10,7 +11,7 @@ export type TemplateName =
   | 'weighbridge' | 'client_deliveries' | 'tyres' | 'vehicle_compliance'
   | 'driver_compliance' | 'products' | 'rate_matrix' | 'daily_dispatch'
   | 'trips_csl' | 'trips_long' | 'fuel_import' | 'tallies_import'
-  | 'driver_allowances' | 'truck_revenue' | 'cost_entries' | 'driver_salaries' | 'users';
+  | 'driver_allowances' | 'truck_revenue' | 'truck_costs' | 'cost_entries' | 'driver_salaries' | 'users';
 
 const HEADERS: Record<TemplateName, string[]> = {
   trips: [
@@ -78,12 +79,10 @@ const HEADERS: Record<TemplateName, string[]> = {
     'Date', 'Truck Plate', 'Driver Name', 'Route', 'Cargo Type', 'Trip Status', 'Notes',
   ],
   driver_allowances: ALLOWANCE_COLUMNS,
-  truck_revenue: ['Month (YYYY-MM)', 'Truck Plate', 'Revenue (KES)', 'Notes'],
-  cost_entries: [
-    'Month (YYYY-MM)', 'Report Type (financial/employment/overhead/miscellaneous)', 'Category (insurance/loan/leasing/labour/consultancy/rent/internet/electricity/water/fines/tolls/parking/permits/accommodation/general/other)',
-    'Truck Plate (blank = whole sub-account)', 'Amount (KES)', 'Notes',
-  ],
-  driver_salaries: ['Month (YYYY-MM)', 'Driver Name', 'Truck Plate', 'Salary (KES)', 'Notes'],
+  truck_revenue: REVENUE_COLUMNS,
+  truck_costs: TRUCK_COST_COLUMNS,
+  cost_entries: COST_ENTRY_COLUMNS,
+  driver_salaries: SALARY_COLUMNS,
   users: ['Full Name', 'Email', 'Role (employee/manager/corporate_admin/spares_clerk/reports_clerk)', 'Sub-Account'],
 };
 
@@ -92,7 +91,7 @@ export const TEMPLATE_LABELS: Record<TemplateName, string> = {
   spare_part_history: 'Spare part history', containers: 'Containers', drivers: 'Drivers', vehicles: 'Trucks / Vehicles',
   work_records: 'Work records', staff: 'Staff', payroll: 'Payroll', weighbridge: 'Weighbridge', client_deliveries: 'Client deliveries',
   tyres: 'Tyres', vehicle_compliance: 'Vehicle compliance', driver_compliance: 'Driver compliance', products: 'Products',
-  rate_matrix: 'Rate matrix', daily_dispatch: 'Daily dispatch', driver_allowances: 'Driver allowances', truck_revenue: 'Truck revenue',
+  rate_matrix: 'Rate matrix', daily_dispatch: 'Daily dispatch', driver_allowances: 'Driver allowances', truck_revenue: 'Truck revenue', truck_costs: 'Insurance, loans & driver allowance',
   cost_entries: 'Cost entries (financial / employment / overhead)', driver_salaries: 'Driver salaries', users: 'Users',
 };
 
@@ -111,7 +110,7 @@ export function templatesForTab(tab: string, portalSlug: string): TemplateName[]
     case 'containers': return ['containers'];
     case 'compliance': return ['vehicle_compliance', 'driver_compliance'];
     case 'reports':
-    case 'cost-reports': return ['truck_revenue', 'cost_entries', 'driver_salaries'];
+    case 'cost-reports': return ['truck_revenue', 'truck_costs', 'cost_entries', 'driver_salaries'];
     case 'users': return ['users'];
     case 'live-monitor': return ['daily_dispatch'];
     default: return ['trips', 'fuel', 'driver_allowances']; // dashboards / overview / sub-account tabs
