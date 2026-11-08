@@ -1,11 +1,16 @@
 import { useTruckDriverFilter, TruckDriverBar } from '@/components/TruckDriverFilter';
 import { useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
-import { FileText, Plus, Trash2, Download } from 'lucide-react';
+import { FileText, Plus, Trash2, Download, Upload } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { LoadingSpinner } from '@/components/Shared';
 import { useToast } from '@/components/Toast';
 import { SubAccount } from '@/lib/portals';
+import { BulkImportModal } from '@/components/BulkImportModal';
+import { resolveNamesToIds } from '@/lib/importLookups';
+import { REVENUE_COLUMNS, TRUCK_COST_COLUMNS, COST_ENTRY_COLUMNS, SALARY_COLUMNS } from '@/lib/importColumns';
+import { downloadTemplate, type TemplateName } from '@/lib/templates';
+import { withVat, VAT_MULTIPLIER } from '@/lib/vat';
 
 /* ------------------------------------------------------------------ */
 /* Reports & Costs                                                     */
@@ -37,9 +42,35 @@ const thisMonth = () => new Date().toLocaleDateString('en-CA').slice(0, 7);
 const monthLabel = (d: string) => new Date(d).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
 const endOfMonth = (ym: string) => { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10); };
 
-type View = 'summary' | 'revenue' | 'maintenance' | 'financial' | 'employment' | 'overhead' | 'miscellaneous';
+const vatPct = Math.round((VAT_MULTIPLIER - 1) * 100);
 
-function EntryForm({ children, onSave, saving, color }: { children: ReactNode; onSave: () => void; saving: boolean; color: string }) {
+/** Accepts 2026-10, 2026/10, 10/2026, 01/10/2026 or Oct-26 / October 2026 and returns YYYY-MM */
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const parseMonth = (v: unknown): string => {
+  const s = String(v ?? '').trim();
+  let y = '', m = '', hit: RegExpMatchArray | null;
+  if ((hit = s.match(/^(\d{4})[-/.](\d{1,2})(?:[-/.]\d{1,2})?$/))) { y = hit[1]; m = hit[2]; }
+  else if ((hit = s.match(/^(\d{1,2})[-/.](\d{4})$/))) { m = hit[1]; y = hit[2]; }
+  else if ((hit = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/))) { m = hit[2]; y = hit[3]; }
+  else if ((hit = s.match(/^([A-Za-z]{3,9})[\s\-/.]+(\d{2}|\d{4})$/))) {
+    const idx = MONTHS.indexOf(hit[1].slice(0, 3).toLowerCase());
+    if (idx >= 0) { m = String(idx + 1); y = hit[2].length === 2 ? `20${hit[2]}` : hit[2]; }
+  }
+  const mn = Number(m);
+  if (!y || mn < 1 || mn > 12) throw new Error(`Month "${s}" is not valid. Use YYYY-MM, for example 2026-10`);
+  return `${y}-${String(mn).padStart(2, '0')}`;
+};
+/** blank = 0; otherwise a number (commas and "KES" are ignored) */
+const parseAmt = (v: unknown, label = 'Amount'): number => {
+  if (v === undefined || v === null || String(v).trim() === '') return 0;
+  const n = Number(String(v).replace(/kes/i, '').replace(/[,\s]/g, ''));
+  if (Number.isNaN(n) || n < 0) throw new Error(`${label} "${v}" is not a valid amount`);
+  return n;
+};
+
+type View = 'summary' | 'revenue' | 'truckcosts' | 'maintenance' | 'financial' | 'employment' | 'overhead' | 'miscellaneous';
+
+function EntryForm({ children, onSave, saving, color, note }: { children: ReactNode; onSave: () => void; saving: boolean; color: string; note?: ReactNode }) {
   return (
     <div className="card p-4 space-y-3">
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 items-end">{children}
@@ -47,12 +78,23 @@ function EntryForm({ children, onSave, saving, color }: { children: ReactNode; o
           <Plus className="h-4 w-4" /> {saving ? 'Saving...' : 'Add'}
         </button>
       </div>
+      {note && <p className="text-xs text-slate-500">{note}</p>}
     </div>
   );
 }
 
 function Table({ head, children }: { head: string[]; children: ReactNode }) {
   return <div className="card table-wrapper overflow-x-auto"><table className="data-table"><thead><tr>{head.map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{children}</tbody></table></div>;
+}
+
+function ImportBar({ template, onImport, label = 'Bulk Import' }: { template: TemplateName; onImport: () => void; label?: string }) {
+  const btn = 'flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50';
+  return (
+    <div className="flex flex-wrap justify-end gap-2">
+      <button onClick={() => downloadTemplate(template)} className={btn}><Download className="h-4 w-4" /> Download Template</button>
+      <button onClick={onImport} className={btn}><Upload className="h-4 w-4" /> {label}</button>
+    </div>
+  );
 }
 
 function Num({ v, bold }: { v: number; bold?: boolean }) {
@@ -71,7 +113,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const [toM, setToM] = useState(thisMonth());
   const [truck, setTruck] = useState('all');
   const [loading, setLoading] = useState(true);
-  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], costs: [], salaries: [] });
+  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], costs: [], salaries: [], truckCosts: [] });
 
   const effSub = lockedSubAccount ?? sub;
   const tdf = useTruckDriverFilter(effSub);
@@ -80,7 +122,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     setLoading(true);
     const start = `${fromM}-01`, end = endOfMonth(toM);
     const scope = (q: any) => (effSub !== 'all' ? q.eq('sub_account', effSub) : q);
-    const [veh, drv, fuel, hist, parts, tyres, rev, costs, sal] = await Promise.all([
+    const [veh, drv, fuel, hist, parts, tyres, rev, costs, sal, tcs] = await Promise.all([
       scope(supabase.from('vehicles').select('id, plate_number, sub_account').order('plate_number')),
       supabase.from('drivers').select('id, name'),
       scope(supabase.from('sub_account_fuel').select('vehicle_id, total_cost, refuel_date, sub_account').gte('refuel_date', start).lte('refuel_date', end)),
@@ -90,12 +132,13 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       scope(supabase.from('truck_revenue').select('*').gte('period', start).lte('period', end)),
       scope(supabase.from('cost_entries').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
       scope(supabase.from('driver_salaries').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
+      scope(supabase.from('truck_costs').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
     ]);
-    const firstErr = [veh, fuel, hist, parts, tyres, rev, costs, sal].find((r: any) => r.error) as any;
+    const firstErr = [veh, fuel, hist, parts, tyres, rev, costs, sal, tcs].find((r: any) => r.error) as any;
     if (firstErr) toast(`Some data could not load: ${firstErr.error.message}`, 'error');
     setD({
       vehicles: veh.data || [], drivers: drv.data || [], fuel: fuel.data || [], hist: hist.data || [], parts: parts.data || [],
-      tyres: tyres.data || [], revenue: rev.data || [], costs: costs.data || [], salaries: sal.data || [],
+      tyres: tyres.data || [], revenue: rev.data || [], costs: costs.data || [], salaries: sal.data || [], truckCosts: tcs.data || [],
     });
     setLoading(false);
   }, [effSub, fromM, toM, toast]);
@@ -125,21 +168,24 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       const tyres = sum(tyreItems, 'truck', v.id, 'cost');
       const salaries = sum(salariesF, 'vehicle_id', v.id, 'amount');
       const other = sum(d.costs, 'vehicle_id', v.id, 'amount');
-      const cost = fuel + spares + tyres + salaries + other;
-      return { id: v.id, plate: v.plate_number, sub: v.sub_account, revenue, fuel, spares, tyres, salaries, other, cost, profit: revenue - cost };
+      const insurance = sum(d.truckCosts, 'vehicle_id', v.id, 'insurance');
+      const loans = sum(d.truckCosts, 'vehicle_id', v.id, 'loan');
+      const allowance = sum(d.truckCosts, 'vehicle_id', v.id, 'driver_allowance');
+      const cost = fuel + spares + tyres + salaries + other + insurance + loans + allowance;
+      return { id: v.id, plate: v.plate_number, sub: v.sub_account, revenue, fuel, spares, tyres, salaries, insurance, loans, allowance, other, cost, profit: revenue - cost };
     });
   }, [d, truck, spareItems, tyreItems, salariesF, tdf.okRow]);
 
   const tot = rows.reduce((a: any, r: any) => {
-    for (const k of ['revenue', 'fuel', 'spares', 'tyres', 'salaries', 'other', 'cost', 'profit']) a[k] = (a[k] || 0) + r[k];
+    for (const k of ['revenue', 'fuel', 'spares', 'tyres', 'salaries', 'insurance', 'loans', 'allowance', 'other', 'cost', 'profit']) a[k] = (a[k] || 0) + r[k];
     return a;
   }, {} as any);
   const unallocated = d.costs.filter((c: any) => !c.vehicle_id).reduce((a: number, c: any) => a + Number(c.amount || 0), 0)
     + salariesF.filter((c: any) => !c.vehicle_id).reduce((a: number, c: any) => a + Number(c.amount || 0), 0);
 
   const exportCsv = () => {
-    const head = ['Truck', 'Sub-account', 'Revenue', 'Fuel', 'Spares', 'Tyres', 'Driver salaries', 'Other truck costs', 'Total cost', 'Profit'];
-    const lines = rows.map((r: any) => [r.plate, subLabel(r.sub), r.revenue, r.fuel, r.spares, r.tyres, r.salaries, r.other, r.cost, r.profit].join(','));
+    const head = ['Truck', 'Sub-account', 'Revenue', 'Fuel', 'Spares', 'Tyres', 'Driver salaries', 'Insurance', 'Loans', 'Driver allowance', 'Other truck costs', 'Total cost', 'Profit'];
+    const lines = rows.map((r: any) => [r.plate, subLabel(r.sub), r.revenue, r.fuel, r.spares, r.tyres, r.salaries, r.insurance, r.loans, r.allowance, r.other, r.cost, r.profit].join(','));
     const blob = new Blob([[head.join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8;' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `truck-profit-${fromM}_to_${toM}.csv`; a.click();
   };
@@ -193,19 +239,124 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     toast('Salary saved'); setEf({ ...ef, amount: '', notes: '' }); load();
   };
 
+  /* ---------------- revenue + per-truck costs: x116%, then ADDED to what is already saved ---------------- */
+  const subOfTruck = (vehicleId: string, fallback: string) => vehSub[vehicleId] || fallback;
+
+  const addRevenue = async (sub: string, vehicleId: string, ym: string, amount: number, notes?: string | null) => {
+    const { error } = await supabase.rpc('add_truck_revenue', {
+      p_sub_account: sub, p_vehicle_id: vehicleId, p_period: `${ym}-01`, p_amount: withVat(amount), p_notes: notes || null, p_entered_by: who,
+    });
+    return error;
+  };
+  const addTruckCosts = async (sub: string, vehicleId: string, ym: string, c: { insurance: number; loan: number; driver_allowance: number }) => {
+    const { error } = await supabase.rpc('add_truck_costs', {
+      p_sub_account: sub, p_vehicle_id: vehicleId, p_period: `${ym}-01`,
+      p_insurance: withVat(c.insurance), p_loan: withVat(c.loan), p_driver_allowance: withVat(c.driver_allowance), p_entered_by: who,
+    });
+    return error;
+  };
+
   const saveRevenue = async () => {
     const amount = Number(ef.amount);
     if (!ef.truck) return toast('Choose the truck', 'error');
-    if (!(amount >= 0) || ef.amount === '') return toast('Enter the revenue', 'error');
+    if (!(amount > 0)) return toast('Enter the revenue', 'error');
     setSaving(true);
-    const { error } = await supabase.from('truck_revenue').upsert(
-      { sub_account: ef.sub, vehicle_id: ef.truck, period: `${ef.month}-01`, amount, notes: ef.notes.trim() || null, entered_by: who },
-      { onConflict: 'vehicle_id,period' });
+    const error = await addRevenue(subOfTruck(ef.truck, ef.sub), ef.truck, ef.month, amount, ef.notes.trim());
     setSaving(false);
     if (error) return toast(error.message, 'error');
-    toast('Revenue saved'); setEf({ ...ef, amount: '', notes: '' }); load();
+    toast(`Added ${kes(withVat(amount))} (incl. ${vatPct}% tax) to the truck's revenue`); setEf({ ...ef, amount: '', notes: '' }); load();
   };
 
+  // Insurance / Loans / Driver allowance grid: one row per truck for the chosen month
+  const [grid, setGrid] = useState<Record<string, { insurance: string; loan: string; driver_allowance: string }>>({});
+  const [saved, setSaved] = useState<Record<string, any>>({});
+  const loadSaved = useCallback(async () => {
+    let q = supabase.from('truck_costs').select('*').eq('period', `${ef.month}-01`);
+    if (effSub !== 'all') q = q.eq('sub_account', effSub);
+    const { data } = await q;
+    setSaved(Object.fromEntries((data || []).map((r: any) => [r.vehicle_id, r])));
+  }, [ef.month, effSub]);
+  useEffect(() => { loadSaved(); }, [loadSaved]);
+  const setCell = (id: string, k: 'insurance' | 'loan' | 'driver_allowance', v: string) =>
+    setGrid(g => ({ ...g, [id]: { insurance: '', loan: '', driver_allowance: '', ...g[id], [k]: v } }));
+
+  const saveTruckCosts = async () => {
+    const entries = Object.entries(grid)
+      .map(([id, g]) => ({ id, insurance: Number(g.insurance) || 0, loan: Number(g.loan) || 0, driver_allowance: Number(g.driver_allowance) || 0 }))
+      .filter(e => e.insurance > 0 || e.loan > 0 || e.driver_allowance > 0);
+    if (!entries.length) return toast('Type an amount for at least one truck', 'error');
+    setSaving(true);
+    let failed = '';
+    const done: string[] = [];
+    for (const e of entries) {
+      const err = await addTruckCosts(subOfTruck(e.id, ef.sub), e.id, ef.month, e);
+      if (err) { failed = err.message; break; }
+      done.push(e.id);
+    }
+    setSaving(false);
+    // clear only what was saved so a failed row is not lost or double-added
+    setGrid(g => { const n = { ...g }; done.forEach(id => delete n[id]); return n; });
+    if (failed) toast(`${done.length} truck(s) saved, then an error: ${failed}`, 'error');
+    else toast(`Saved for ${done.length} truck(s) (incl. ${vatPct}% tax, added to the existing figures)`);
+    load(); loadSaved();
+  };
+
+  /* ---------------- bulk import (same columns as each tab's form) ---------------- */
+  const [bulk, setBulk] = useState<null | 'revenue' | 'truckcosts' | 'costs' | 'salaries'>(null);
+  const costType: CostType | null = (['financial', 'employment', 'overhead', 'miscellaneous'] as string[]).includes(view) ? (view as CostType) : null;
+  const sampleTruck = d.vehicles[0]?.plate_number || 'KDG 123A';
+  const sampleDriver = d.drivers[0]?.name || 'John Kamau';
+  const sampleMonth = thisMonth();
+
+  const truckOf = (rec: Record<string, any>, required: boolean) => {
+    const r = resolveNamesToIds(rec, d.vehicles, d.drivers);
+    if (required && !r.vehicle_id) throw new Error('Truck is required');
+    return r;
+  };
+  const wrap = (fn: (rec: Record<string, any>) => Promise<string | null | undefined>) => async (rec: Record<string, any>) => {
+    try { const err = await fn(rec); return err ? { ok: false, error: err } : { ok: true }; }
+    catch (e: any) { return { ok: false, error: e?.message || 'could not be saved' }; }
+  };
+
+  const importRevenue = wrap(async rec => {
+    const r = truckOf(rec, true); const ym = parseMonth(rec.month); const amt = parseAmt(rec.amount, 'Revenue');
+    if (!(amt > 0)) throw new Error('Revenue is required');
+    return (await addRevenue(subOfTruck(r.vehicle_id, rec.sub_account), r.vehicle_id, ym, amt, rec.notes))?.message;
+  });
+  const importTruckCosts = wrap(async rec => {
+    const r = truckOf(rec, true); const ym = parseMonth(rec.month);
+    const c = { insurance: parseAmt(rec.insurance, 'Insurance'), loan: parseAmt(rec.loan, 'Loan'), driver_allowance: parseAmt(rec.driver_allowance, 'Driver allowance') };
+    if (!(c.insurance > 0 || c.loan > 0 || c.driver_allowance > 0)) throw new Error('Enter insurance, loan or driver allowance');
+    return (await addTruckCosts(subOfTruck(r.vehicle_id, rec.sub_account), r.vehicle_id, ym, c))?.message;
+  });
+  const importCosts = (type: CostType) => wrap(async rec => {
+    const r = truckOf(rec, false); const ym = parseMonth(rec.month); const amt = parseAmt(rec.amount);
+    const category = String(rec.category || '').trim().toLowerCase();
+    const allowed = [...CATEGORIES[type].items, 'other'];
+    if (!allowed.includes(category)) throw new Error(`Category "${rec.category ?? ''}" must be one of: ${allowed.join(', ')}`);
+    if (!(amt > 0)) throw new Error('Amount is required');
+    const { error } = await supabase.from('cost_entries').insert({
+      sub_account: r.vehicle_id ? subOfTruck(r.vehicle_id, rec.sub_account) : rec.sub_account, vehicle_id: r.vehicle_id || null, report_type: type, category,
+      period: `${ym}-01`, amount: amt, notes: rec.notes || null, entered_by: who,
+    });
+    return error?.message;
+  });
+  const importSalaries = wrap(async rec => {
+    const r = truckOf(rec, false); const ym = parseMonth(rec.month); const amt = parseAmt(rec.amount, 'Salary');
+    if (!r.driver_id) throw new Error('Driver is required');
+    if (!(amt > 0)) throw new Error('Salary amount is required');
+    const { error } = await supabase.from('driver_salaries').insert({
+      sub_account: r.vehicle_id ? subOfTruck(r.vehicle_id, rec.sub_account) : rec.sub_account, driver_id: r.driver_id, vehicle_id: r.vehicle_id || null,
+      period: `${ym}-01`, amount: amt, notes: rec.notes || null, entered_by: who,
+    });
+    return error?.message;
+  });
+
+  const bulkCfg = bulk === 'revenue' ? { table: 'truck_revenue', cols: REVENUE_COLUMNS, sample: [sampleMonth, sampleTruck, '100000', ''], insert: importRevenue }
+    : bulk === 'truckcosts' ? { table: 'truck_costs', cols: TRUCK_COST_COLUMNS, sample: [sampleMonth, sampleTruck, '25000', '40000', '15000'], insert: importTruckCosts }
+    : bulk === 'salaries' ? { table: 'driver_salaries', cols: SALARY_COLUMNS, sample: [sampleMonth, sampleDriver, sampleTruck, '35000', ''], insert: importSalaries }
+    : bulk === 'costs' && costType ? { table: 'cost_entries', cols: COST_ENTRY_COLUMNS, sample: [sampleMonth, CATEGORIES[costType].items[0], '', '10000', ''], insert: importCosts(costType) }
+    : null;
 
   /* ---------------- views ---------------- */
   const costPanel = (type: CostType) => {
@@ -219,6 +370,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     return (
       <div className="space-y-4">
         <p className="text-sm text-slate-500">{cfg.hint}</p>
+        <ImportBar template="cost_entries" onImport={() => setBulk('costs')} label={type === 'employment' ? 'Bulk Import Costs' : 'Bulk Import'} />
         <EntryForm color={portalColor} onSave={() => saveCost(type)} saving={saving}>
           {SubPick()}
           <div><label className={labelCls}>Month</label><input type="month" value={ef.month} onChange={e => setEf({ ...ef, month: e.target.value })} className={inputCls} /></div>
@@ -228,6 +380,8 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
           <div><label className={labelCls}>Amount (KES)</label><input type="number" value={ef.amount} onChange={e => setEf({ ...ef, amount: e.target.value })} className={inputCls} /></div>
         </EntryForm>
         {type === 'employment' && (
+          <>
+          <ImportBar template="driver_salaries" onImport={() => setBulk('salaries')} label="Bulk Import Salaries" />
           <EntryForm color={portalColor} onSave={saveSalary} saving={saving}>
             {SubPick()}
             <div><label className={labelCls}>Driver salary — month</label><input type="month" value={ef.month} onChange={e => setEf({ ...ef, month: e.target.value })} className={inputCls} /></div>
@@ -236,6 +390,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
             {TruckPick('No truck (unallocated)')}
             <div><label className={labelCls}>Salary (KES)</label><input type="number" value={ef.amount} onChange={e => setEf({ ...ef, amount: e.target.value })} className={inputCls} /></div>
           </EntryForm>
+          </>
         )}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <div className="card p-4"><p className="text-xs font-semibold text-slate-500">Total {cfg.title.toLowerCase()}</p><p className="text-xl font-bold">{kes(total)}</p></div>
@@ -252,7 +407,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   };
 
   const tabs: { key: View; label: string }[] = [
-    { key: 'summary', label: 'Truck Summary' }, { key: 'revenue', label: 'Revenue' }, { key: 'maintenance', label: 'Maintenance & Truck Cost' },
+    { key: 'summary', label: 'Truck Summary' }, { key: 'revenue', label: 'Revenue' }, { key: 'truckcosts', label: 'Insurance, Loans & Allowance' }, { key: 'maintenance', label: 'Maintenance & Truck Cost' },
     { key: 'financial', label: 'Financial Cost' }, { key: 'employment', label: 'Employment Cost' }, { key: 'overhead', label: 'Overhead Cost' }, { key: 'miscellaneous', label: 'Miscellaneous' },
   ];
 
@@ -288,26 +443,32 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
           {view === 'summary' && (
             <div className="space-y-3">
               <div className="flex justify-end"><button onClick={exportCsv} className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700"><Download className="h-4 w-4" /> Export CSV</button></div>
-              <Table head={['Truck', ...(effSub === 'all' ? ['Sub-account'] : []), 'Revenue', 'Fuel', 'Spares', 'Tyres', 'Driver salaries', 'Other costs', 'Total cost', 'Profit']}>
+              <Table head={['Truck', ...(effSub === 'all' ? ['Sub-account'] : []), 'Revenue', 'Fuel', 'Spares', 'Tyres', 'Driver salaries', 'Insurance', 'Loans', 'Driver allowance', 'Other costs', 'Total cost', 'Profit']}>
                 {rows.map((r: any) => (
                   <tr key={r.id}><td className="font-bold">{r.plate}</td>{effSub === 'all' && <td>{subLabel(r.sub)}</td>}
-                    <Num v={r.revenue} /><Num v={r.fuel} /><Num v={r.spares} /><Num v={r.tyres} /><Num v={r.salaries} /><Num v={r.other} /><Num v={r.cost} bold />
+                    <Num v={r.revenue} /><Num v={r.fuel} /><Num v={r.spares} /><Num v={r.tyres} /><Num v={r.salaries} /><Num v={r.insurance} /><Num v={r.loans} /><Num v={r.allowance} /><Num v={r.other} /><Num v={r.cost} bold />
                     <td className={`text-right tabular-nums font-bold ${r.profit < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{kes(r.profit)}</td></tr>
                 ))}
-                <tr className="bg-slate-50 font-bold"><td>TOTAL</td>{effSub === 'all' && <td />}<Num v={tot.revenue || 0} bold /><Num v={tot.fuel || 0} bold /><Num v={tot.spares || 0} bold /><Num v={tot.tyres || 0} bold /><Num v={tot.salaries || 0} bold /><Num v={tot.other || 0} bold /><Num v={tot.cost || 0} bold />
+                <tr className="bg-slate-50 font-bold"><td>TOTAL</td>{effSub === 'all' && <td />}<Num v={tot.revenue || 0} bold /><Num v={tot.fuel || 0} bold /><Num v={tot.spares || 0} bold /><Num v={tot.tyres || 0} bold /><Num v={tot.salaries || 0} bold /><Num v={tot.insurance || 0} bold /><Num v={tot.loans || 0} bold /><Num v={tot.allowance || 0} bold /><Num v={tot.other || 0} bold /><Num v={tot.cost || 0} bold />
                   <td className={`text-right tabular-nums ${(tot.profit || 0) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{kes(tot.profit || 0)}</td></tr>
               </Table>
               <p className="text-xs text-slate-500">
                 Costs not tied to a truck (whole sub-account overheads, financial and employment costs, unallocated salaries): <b>{kes(unallocated)}</b>.
                 Profit after these: <b>{kes((tot.profit || 0) - (truck === 'all' ? unallocated : 0))}</b>{truck !== 'all' && ' (shown for all trucks only)'}.
-                Spares are counted when installed; tyres when fitted; fuel from the Fuel page; revenue from the Revenue tab.
+                Spares are counted when installed; tyres when fitted; fuel from the Fuel page; revenue from the Revenue tab; insurance, loans and driver allowance from the Insurance, Loans &amp; Allowance tab.
               </p>
             </div>
           )}
 
           {view === 'revenue' && (
             <div className="space-y-4">
-              <EntryForm color={portalColor} onSave={saveRevenue} saving={saving}>
+              <ImportBar template="truck_revenue" onImport={() => setBulk('revenue')} />
+              <EntryForm color={portalColor} onSave={saveRevenue} saving={saving} note={(() => {
+                const amt = Number(ef.amount);
+                const cur = d.revenue.find((r: any) => r.vehicle_id === ef.truck && String(r.period).slice(0, 7) === ef.month);
+                if (!(amt > 0)) return `Each amount is multiplied by ${Math.round(VAT_MULTIPLIER * 100)}% (tax inclusive) and added to the revenue already saved for that truck and month.`;
+                return `${kes(amt)} × ${Math.round(VAT_MULTIPLIER * 100)}% = ${kes(withVat(amt))} will be added${cur ? ` to ${kes(Number(cur.amount))} → new total ${kes(Number(cur.amount) + withVat(amt))}` : ' to the truck and month'}.`;
+              })()}>
                 {SubPick()}
                 <div><label className={labelCls}>Month</label><input type="month" value={ef.month} onChange={e => setEf({ ...ef, month: e.target.value })} className={inputCls} /></div>
                 {TruckPick('— Select truck —')}
@@ -320,7 +481,51 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
                     <td><button onClick={() => remove('truck_revenue', r.id)} className="text-slate-400 hover:text-red-600" aria-label="Delete"><Trash2 className="h-4 w-4" /></button></td></tr>
                 ))}
               </Table>
-              <p className="text-xs text-slate-500">Saving again for the same truck and month replaces the earlier figure.</p>
+              <p className="text-xs text-slate-500">Saving again for the same truck and month adds to the earlier figure. To correct a mistake, delete the row and enter the right total.</p>
+            </div>
+          )}
+
+          {view === 'truckcosts' && (
+            <div className="space-y-4">
+              <ImportBar template="truck_costs" onImport={() => setBulk('truckcosts')} />
+              <div className="card p-4 space-y-3">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div><label className={labelCls}>Month</label><input type="month" value={ef.month} onChange={e => setEf({ ...ef, month: e.target.value })} className={inputCls} /></div>
+                  <button onClick={saveTruckCosts} disabled={saving} className="flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" style={{ background: portalColor }}>
+                    <Plus className="h-4 w-4" /> {saving ? 'Saving...' : 'Save all'}
+                  </button>
+                  <p className="text-xs text-slate-500 flex-1 min-w-[16rem]">Type the figures under each truck. Every amount is multiplied by {Math.round(VAT_MULTIPLIER * 100)}% (tax inclusive) and added to what is already saved for that truck in {monthLabel(`${ef.month}-01`)}. Leave a box empty to skip it.</p>
+                </div>
+                <div className="table-wrapper overflow-x-auto">
+                  <table className="data-table">
+                    <thead><tr><th>Truck</th>{effSub === 'all' && <th>Sub-account</th>}<th>Insurance (KES)</th><th>Loans (KES)</th><th>Driver allowance (KES)</th><th className="text-right">Saved this month</th></tr></thead>
+                    <tbody>
+                      {d.vehicles.filter((v: any) => (truck === 'all' || v.id === truck) && tdf.okRow(v.id, null)).map((v: any) => {
+                        const g = grid[v.id] || { insurance: '', loan: '', driver_allowance: '' };
+                        const sv = saved[v.id];
+                        const cell = (k: 'insurance' | 'loan' | 'driver_allowance') => (
+                          <td><input type="number" min="0" value={g[k]} onChange={e => setCell(v.id, k, e.target.value)} className={`${inputCls} min-w-[7rem]`} />
+                            {sv && <span className="block text-[11px] text-slate-400 mt-0.5">saved {kes(Number(sv[k] || 0))}</span>}</td>
+                        );
+                        return (
+                          <tr key={v.id}><td className="font-bold">{v.plate_number}</td>{effSub === 'all' && <td>{subLabel(v.sub_account)}</td>}
+                            {cell('insurance')}{cell('loan')}{cell('driver_allowance')}
+                            <Num v={sv ? Number(sv.insurance || 0) + Number(sv.loan || 0) + Number(sv.driver_allowance || 0) : 0} bold /></tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <h3 className="text-sm font-bold text-slate-700">Saved figures ({monthLabel(`${fromM}-01`)} – {monthLabel(`${toM}-01`)})</h3>
+              <Table head={['Month', 'Truck', 'Sub-account', 'Insurance', 'Loans', 'Driver allowance', 'Total', '']}>
+                {d.truckCosts.filter((r: any) => (truck === 'all' || r.vehicle_id === truck) && tdf.okRow(r.vehicle_id, null)).map((r: any) => (
+                  <tr key={r.id}><td>{monthLabel(r.period)}</td><td className="font-bold">{plate[r.vehicle_id] || '—'}</td><td>{subLabel(r.sub_account)}</td>
+                    <Num v={Number(r.insurance)} /><Num v={Number(r.loan)} /><Num v={Number(r.driver_allowance)} /><Num v={Number(r.insurance) + Number(r.loan) + Number(r.driver_allowance)} bold />
+                    <td><button onClick={async () => { await remove('truck_costs', r.id); loadSaved(); }} className="text-slate-400 hover:text-red-600" aria-label="Delete"><Trash2 className="h-4 w-4" /></button></td></tr>
+                ))}
+              </Table>
+              <p className="text-xs text-slate-500">To correct a mistake, delete the row and enter the right totals.</p>
             </div>
           )}
 
@@ -346,6 +551,20 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
           {view === 'overhead' && costPanel('overhead')}
           {view === 'miscellaneous' && costPanel('miscellaneous')}
         </>
+      )}
+
+      {bulkCfg && (
+        <BulkImportModal
+          open
+          onClose={() => setBulk(null)}
+          tableName={bulkCfg.table}
+          portalColor={portalColor}
+          subAccount={(effSub !== 'all' ? effSub : ef.sub) as SubAccount}
+          sampleColumns={bulkCfg.cols}
+          sampleRow={bulkCfg.sample}
+          insertRecord={bulkCfg.insert}
+          onSuccess={() => { load(); loadSaved(); }}
+        />
       )}
     </div>
   );
