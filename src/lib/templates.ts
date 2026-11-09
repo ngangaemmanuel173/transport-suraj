@@ -10,7 +10,7 @@ export type TemplateName =
   | 'containers' | 'drivers' | 'vehicles' | 'work_records' | 'staff' | 'payroll'
   | 'weighbridge' | 'client_deliveries' | 'tyres' | 'vehicle_compliance'
   | 'driver_compliance' | 'products' | 'rate_matrix' | 'daily_dispatch'
-  | 'trips_csl' | 'trips_long' | 'fuel_import' | 'tallies_import'
+  | 'trips_csl' | 'trips_long' | 'fuel_import' | 'fuel_daily' | 'tallies_import'
   | 'driver_allowances' | 'truck_revenue' | 'truck_costs' | 'cost_entries' | 'driver_salaries' | 'users';
 
 const HEADERS: Record<TemplateName, string[]> = {
@@ -27,6 +27,8 @@ const HEADERS: Record<TemplateName, string[]> = {
   trips_csl: CSL_TRIP_COLUMNS,
   trips_long: LONG_TRIP_COLUMNS,
   fuel_import: FUEL_COLUMNS,
+  // CSL / Tarmal daily fuel record: the same three columns as the petrol list (DATE, VEHICLE, LITRES)
+  fuel_daily: ['DATE', 'VEHICLE', 'LITRES'],
   tallies_import: TALLY_COLUMNS,
   fuel: [
     'Date', 'Truck Plate', 'Trailer No', 'Driver', 'From', 'Destination', 'Expected Litres', 'Actual Litres',
@@ -87,7 +89,7 @@ const HEADERS: Record<TemplateName, string[]> = {
 };
 
 export const TEMPLATE_LABELS: Record<TemplateName, string> = {
-  trips: 'Trips', trips_tahmal: 'Trips (Tarmal)', trips_csl: 'Trips', trips_long: 'Trips', fuel_import: 'Fuel', tallies_import: 'Tallies', fuel: 'Fuel', tallies: 'Tallies', spare_parts: 'Spare parts',
+  trips: 'Trips', trips_tahmal: 'Trips (Tarmal)', trips_csl: 'Trips', trips_long: 'Trips', fuel_import: 'Fuel', fuel_daily: 'Fuel (daily record)', tallies_import: 'Tallies', fuel: 'Fuel', tallies: 'Tallies', spare_parts: 'Spare parts',
   spare_part_history: 'Spare part history', containers: 'Containers', drivers: 'Drivers', vehicles: 'Trucks / Vehicles',
   work_records: 'Work records', staff: 'Staff', payroll: 'Payroll', weighbridge: 'Weighbridge', client_deliveries: 'Client deliveries',
   tyres: 'Tyres', vehicle_compliance: 'Vehicle compliance', driver_compliance: 'Driver compliance', products: 'Products',
@@ -100,7 +102,7 @@ export function templatesForTab(tab: string, portalSlug: string): TemplateName[]
   if (tab.startsWith('spares-')) return ['spare_parts', 'spare_part_history'];
   switch (tab) {
     case 'trips': return [portalSlug === 'csl' ? 'trips_csl' : (portalSlug === 'tarmal' || portalSlug === 'pn_mashru') ? 'trips_long' : 'trips'];
-    case 'fuel': return [portalSlug === 'mcl' ? 'fuel' : 'fuel_import'];
+    case 'fuel': return [portalSlug === 'mcl' ? 'fuel' : (portalSlug === 'csl' || portalSlug === 'tarmal') ? 'fuel_daily' : 'fuel_import'];
     case 'allowances': return ['driver_allowances'];
     case 'tallies': return [portalSlug === 'mcl' ? 'tallies' : 'tallies_import'];
     case 'drivers': return ['drivers'];
