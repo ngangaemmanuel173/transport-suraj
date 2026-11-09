@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Fuel as FuelIcon, ChevronLeft, ChevronRight, Save, Upload, Download, Search, CalendarDays, Table2, X,
+  Fuel as FuelIcon, List, Trash2, ChevronLeft, ChevronRight, Save, Upload, Download, Search, CalendarDays, Table2, X,
 } from 'lucide-react';
 import { supabase, activeSubAccount } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -24,6 +24,8 @@ const shiftMonth = (ym: string, by: number) => { const [y, m] = ym.split('-').ma
 const monthLabel = (ym: string) => { const [y, m] = ym.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleString('en-GB', { month: 'long', year: 'numeric' }); };
 const fmt = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 1 });
 const FUEL_LABEL: Record<FuelType, string> = { diesel: 'Diesel', petrol: 'Petrol' };
+// Price per litre (KES) the cost is worked out from. It can be changed on the page, and each truck's cost can be adjusted too.
+const DEFAULT_PRICE: Record<FuelType, string> = { diesel: '214', petrol: '' };
 
 interface Rec { id: string; vehicle_id: string | null; refuel_date: string; actual_litres: number | null; cost_per_litre: number | null; total_cost: number | null; fuel_type: FuelType | null; notes: string | null }
 
@@ -36,12 +38,14 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
   const [saving, setSaving] = useState(false);
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [records, setRecords] = useState<Rec[]>([]);
-  const [view, setView] = useState<'entry' | 'sheet'>('entry');
+  const [view, setView] = useState<'entry' | 'sheet' | 'entries'>('entry');
   const [fuelType, setFuelType] = useState<FuelType>('diesel');
   const [date, setDate] = useState(localToday());
   const [month, setMonth] = useState(localToday().slice(0, 7));
   const [search, setSearch] = useState('');
-  const [price, setPrice] = useState('');
+  const [price, setPrice] = useState(DEFAULT_PRICE.diesel);
+  const [costs, setCosts] = useState<Record<string, string>>({});
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [showAllTrucks, setShowAllTrucks] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -89,28 +93,60 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
     return m;
   }, [records, date, fuelType]);
 
+  // Each fuel starts with its usual price (diesel 214). Declared before the reset below so the reset wins.
+  useEffect(() => { setPrice(DEFAULT_PRICE[fuelType]); }, [fuelType]);
+
   // Reset the boxes whenever the day, fuel type or saved data changes
   useEffect(() => {
     const next: Record<string, string> = {};
-    dayRecs.forEach((list, vid) => { next[vid] = String(list.reduce((s, r) => s + (r.actual_litres ?? 0), 0)); });
-    setInputs(next);
-  }, [dayRecs]);
+    const c: Record<string, string> = {};
+    const t: Record<string, boolean> = {};
+    const usual = Number(DEFAULT_PRICE[fuelType]) || 0;
+    dayRecs.forEach((list, vid) => {
+      const l = list.reduce((s, r) => s + (r.actual_litres ?? 0), 0);
+      next[vid] = String(l);
+      // A saved cost that is not litres x the usual price was adjusted by hand: keep it as typed
+      if (list.length === 1 && list[0].total_cost != null && (!usual || Math.abs(l * usual - list[0].total_cost) > 0.01)) {
+        c[vid] = String(list[0].total_cost);
+        t[vid] = true;
+      }
+    });
+    setInputs(next); setCosts(c); setTouched(t);
+  }, [dayRecs, fuelType]);
+
+  const priceNum = Number(price) || 0;
+  const autoCost = (vid: string) => {
+    const l = Number(inputs[vid]);
+    return l > 0 && priceNum > 0 ? String(Number((l * priceNum).toFixed(2))) : '';
+  };
+  const costFor = (vid: string) => (touched[vid] ? costs[vid] ?? '' : autoCost(vid));
+  const originalCost = (vid: string) => {
+    const r = dayRecs.get(vid)?.[0];
+    return r?.total_cost != null ? String(r.total_cost) : '';
+  };
 
   const originalFor = (vid: string) => {
     const list = dayRecs.get(vid);
     return list ? String(list.reduce((s, r) => s + (r.actual_litres ?? 0), 0)) : '';
   };
   const isLocked = (vid: string) => (dayRecs.get(vid)?.length ?? 0) > 1; // several entries for one day: edit them in the database, not here
-  const dirtyIds = typeVehicles.filter(v => !isLocked(v.id) && (inputs[v.id] ?? '') !== originalFor(v.id)).map(v => v.id);
+  const dirtyIds = typeVehicles.filter(v => {
+    if (isLocked(v.id)) return false;
+    const l = (inputs[v.id] ?? '').trim();
+    if (l !== originalFor(v.id)) return true;
+    return l !== '' && Number(costFor(v.id) || 0) !== Number(originalCost(v.id) || 0);
+  }).map(v => v.id);
 
   const entryTotal = typeVehicles.reduce((s, v) => s + (Number(inputs[v.id]) || 0), 0);
+  const entryCost = typeVehicles.reduce((s, v) => s + (Number(costFor(v.id)) || 0), 0);
   const visibleVehicles = typeVehicles.filter(v => !search.trim() || normPlate(v.plate_number).includes(normPlate(search)));
 
   const saveDay = async () => {
     const bad = dirtyIds.find(id => { const t = (inputs[id] ?? '').trim(); return t !== '' && !(Number(t) > 0); });
     if (bad) { showToast(`Litres for ${vehicles.find(v => v.id === bad)?.plate_number} must be a number above 0`, 'error'); return; }
-    const pricePerL = price.trim() === '' ? null : Number(price);
-    if (pricePerL !== null && !(pricePerL >= 0)) { showToast('Price per litre must be a number', 'error'); return; }
+    if (price.trim() !== '' && !(Number(price) >= 0)) { showToast('Price per litre must be a number', 'error'); return; }
+    const badCost = dirtyIds.find(id => { const c = costFor(id); return c !== '' && !(Number(c) >= 0); });
+    if (badCost) { showToast(`Cost for ${vehicles.find(v => v.id === badCost)?.plate_number} must be a number`, 'error'); return; }
 
     setSaving(true);
     try {
@@ -123,16 +159,18 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
           continue;
         }
         const litres = Number(text);
+        const c = costFor(vid);
+        const total = c === '' ? null : Number(c);
+        const perLitre = total != null ? Number((total / litres).toFixed(2)) : null;
         if (existing) {
-          const p = pricePerL ?? existing.cost_per_litre;
           const { error } = await supabase.from('sub_account_fuel').update({
-            actual_litres: litres, cost_per_litre: p, total_cost: p != null ? Number((litres * p).toFixed(2)) : null,
+            actual_litres: litres, cost_per_litre: perLitre, total_cost: total,
           }).eq('id', existing.id);
           if (error) throw error;
         } else {
           inserts.push({
             sub_account: subAccount, vehicle_id: vid, refuel_date: date, fuel_type: fuelType, actual_litres: litres,
-            cost_per_litre: pricePerL, total_cost: pricePerL != null ? Number((litres * pricePerL).toFixed(2)) : null,
+            cost_per_litre: perLitre, total_cost: total,
           });
         }
       }
@@ -164,6 +202,27 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
   }, [records, fuelType]);
   const sheetVehicles = vehicles.filter(v => sheet.byVeh.has(v.id) || (showAllTrucks && (v.fuel_type || 'diesel') === fuelType));
   const monthCost = records.filter(r => r.fuel_type === fuelType).reduce((s, r) => s + (r.total_cost ?? 0), 0);
+
+  const entryRows = records.filter(r => r.fuel_type === fuelType).sort((a, b) => (a.refuel_date < b.refuel_date ? 1 : a.refuel_date > b.refuel_date ? -1 : 0));
+  const blankCost = entryRows.filter(r => r.total_cost == null && (r.actual_litres ?? 0) > 0);
+  const applyPrice = async () => {
+    if (!(priceNum > 0)) { showToast('Set a price per litre first (Daily Entry tab)', 'error'); return; }
+    if (!window.confirm(`Set the cost of ${blankCost.length} ${FUEL_LABEL[fuelType].toLowerCase()} entries with no cost to litres x KES ${priceNum}?`)) return;
+    const results = await Promise.all(blankCost.map(r => supabase.from('sub_account_fuel').update({
+      cost_per_litre: priceNum, total_cost: Number(((r.actual_litres ?? 0) * priceNum).toFixed(2)),
+    }).eq('id', r.id)));
+    const failed = results.find(x => x.error);
+    if (failed?.error) showToast('Some entries failed: ' + failed.error.message, 'error');
+    else showToast(`Cost added to ${blankCost.length} entries`, 'success');
+    load();
+  };
+  const deleteEntry = async (r: Rec) => {
+    const plate = vehicles.find(v => v.id === r.vehicle_id)?.plate_number ?? 'this truck';
+    if (!window.confirm(`Delete ${fmt(r.actual_litres ?? 0)} L for ${plate} on ${r.refuel_date}?`)) return;
+    const { error } = await supabase.from('sub_account_fuel').delete().eq('id', r.id);
+    if (error) showToast('Failed to delete: ' + error.message, 'error');
+    else { showToast('Entry deleted', 'success'); load(); }
+  };
 
   const exportCsv = () => {
     const head = ['Truck', ...monthDays.map(d => `${d}`), 'Total'];
@@ -230,6 +289,9 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
         <button className={tabBtn(view === 'sheet')} style={view === 'sheet' ? { background: portalColor } : undefined} onClick={() => setView('sheet')}>
           <Table2 className="h-4 w-4" /> Month Sheet
         </button>
+        <button className={tabBtn(view === 'entries')} style={view === 'entries' ? { background: portalColor } : undefined} onClick={() => setView('entries')}>
+          <List className="h-4 w-4" /> Entries
+        </button>
         <div className="flex rounded-lg border border-slate-200 overflow-hidden ml-auto">
           {(['diesel', 'petrol'] as FuelType[]).map(t => (
             <button key={t} onClick={() => setFuelType(t)}
@@ -249,8 +311,9 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
               <input type="date" className="input" value={date} onChange={e => changeDate(e.target.value)} />
             </div>
             <div>
-              <label className="label">Price per litre (KES, optional)</label>
-              <input type="number" step="0.01" min="0" className="input w-48" placeholder="for cost reports" value={price} onChange={e => setPrice(e.target.value)} />
+              <label className="label">Price per litre (KES)</label>
+              <input type="number" step="0.01" min="0" className="input w-40" placeholder="e.g. 214" value={price}
+                onChange={e => { setPrice(e.target.value); setTouched({}); }} title="Changing the price recalculates every truck's cost below" />
             </div>
             <div className="relative">
               <label className="label">Find truck</label>
@@ -260,7 +323,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
             <button className="btn-secondary text-sm" onClick={() => setTypesOpen(true)}>Set truck fuel types</button>
             <div className="ml-auto text-right">
               <p className="text-xs text-slate-400">{FUEL_LABEL[fuelType]} total for {date}</p>
-              <p className="text-2xl font-bold text-slate-800">{fmt(entryTotal)} L</p>
+              <p className="text-2xl font-bold text-slate-800">{fmt(entryTotal)} L{entryCost > 0 ? <span className="text-sm font-medium text-slate-500"> · KES {entryCost.toLocaleString()}</span> : null}</p>
             </div>
           </div>
 
@@ -271,7 +334,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
           ) : (
             <div className="table-wrapper overflow-x-auto">
               <table className="data-table">
-                <thead><tr><th>Truck</th><th className="w-48">Litres given</th><th></th></tr></thead>
+                <thead><tr><th>Truck</th><th className="w-44">Litres given</th><th className="w-48">Cost (KES)</th><th></th></tr></thead>
                 <tbody>
                   {visibleVehicles.map(v => {
                     const locked = isLocked(v.id);
@@ -283,6 +346,12 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
                           <input type="number" min="0" step="0.1" disabled={locked}
                             className={`input py-1.5 ${changed ? 'border-amber-400 bg-amber-50' : ''}`}
                             value={inputs[v.id] ?? ''} onChange={e => setInputs(p => ({ ...p, [v.id]: e.target.value }))} />
+                        </td>
+                        <td>
+                          <input type="number" min="0" step="0.01" disabled={locked} className="input py-1.5"
+                            placeholder={priceNum > 0 ? '' : 'set a price'}
+                            value={locked ? '' : costFor(v.id)}
+                            onChange={e => { const val = e.target.value; setTouched(p => ({ ...p, [v.id]: true })); setCosts(p => ({ ...p, [v.id]: val })); }} />
                         </td>
                         <td className="text-xs text-slate-400">{locked ? 'Several entries for this day' : ''}</td>
                       </tr>
@@ -300,7 +369,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
             </button>
           </div>
         </div>
-      ) : (
+      ) : view === 'sheet' ? (
         <div className="card p-4 space-y-4">
           <div className="flex flex-wrap items-center gap-3">
             <button className="btn-secondary p-2" onClick={() => changeMonth(shiftMonth(month, -1))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></button>
@@ -362,6 +431,43 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
             </div>
           )}
         </div>
+      ) : (
+        <div className="card p-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <button className="btn-secondary p-2" onClick={() => changeMonth(shiftMonth(month, -1))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></button>
+            <h2 className="text-lg font-bold text-slate-800 min-w-[10rem] text-center">{monthLabel(month)}</h2>
+            <button className="btn-secondary p-2" onClick={() => changeMonth(shiftMonth(month, 1))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></button>
+            {blankCost.length > 0 && (
+              <button className="btn-secondary text-sm" onClick={applyPrice}>Add cost to {blankCost.length} entries without one (KES {priceNum || '?'}/L)</button>
+            )}
+            <p className="ml-auto text-sm text-slate-500">{entryRows.length} entries · <b className="text-slate-800">{fmt(sheet.grand)} L</b>{monthCost > 0 ? <> · KES <b className="text-slate-800">{monthCost.toLocaleString()}</b></> : null}</p>
+          </div>
+          {entryRows.length === 0 ? (
+            <p className="text-sm text-slate-500 py-8 text-center">No {FUEL_LABEL[fuelType].toLowerCase()} recorded in {monthLabel(month)}.</p>
+          ) : (
+            <div className="table-wrapper overflow-x-auto">
+              <table className="data-table">
+                <thead><tr><th>Date</th><th>Truck</th><th>Litres</th><th>Price / L</th><th>Cost (KES)</th><th>Note</th><th></th></tr></thead>
+                <tbody>
+                  {entryRows.map(r => (
+                    <tr key={r.id}>
+                      <td className="whitespace-nowrap">{r.refuel_date}</td>
+                      <td className="font-semibold text-slate-800 whitespace-nowrap">{vehicles.find(v => v.id === r.vehicle_id)?.plate_number ?? '—'}</td>
+                      <td>{fmt(r.actual_litres ?? 0)}</td>
+                      <td>{r.cost_per_litre != null ? r.cost_per_litre : '—'}</td>
+                      <td>{r.total_cost != null ? r.total_cost.toLocaleString() : '—'}</td>
+                      <td className="text-slate-500">{r.notes || ''}</td>
+                      <td className="whitespace-nowrap">
+                        <button className="text-xs font-semibold text-blue-600 hover:underline mr-3" onClick={() => { setDate(r.refuel_date); setView('entry'); }}>Edit day</button>
+                        <button className="text-slate-400 hover:text-red-600" aria-label="Delete entry" onClick={() => deleteEntry(r)}><Trash2 className="h-4 w-4" /></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       )}
 
       <TruckTypesModal open={typesOpen} onClose={() => setTypesOpen(false)} vehicles={vehicles} onSaved={load} />
@@ -373,7 +479,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
         subAccount={subAccount}
         defaultType={fuelType}
         portalColor={portalColor}
-        onDone={(ym) => { if (ym) changeMonth(ym); else load(); }}
+        onDone={(ym, t) => { setFuelType(t); setView('sheet'); if (ym && ym !== month) changeMonth(ym); else load(); }}
       />
     </div>
   );
@@ -382,7 +488,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
 // ---------------------------------------------------------------------------------------------
 
 function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalColor, onDone }: {
-  open: boolean; onClose: () => void; vehicles: any[]; subAccount: string; defaultType: FuelType; portalColor: string; onDone: (ym: string | null) => void;
+  open: boolean; onClose: () => void; vehicles: any[]; subAccount: string; defaultType: FuelType; portalColor: string; onDone: (ym: string | null, type: FuelType) => void;
 }) {
   const { showToast } = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -390,12 +496,15 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
   const [type, setType] = useState<FuelType>(defaultType);
   const [year, setYear] = useState(new Date().getFullYear());
+  const [importPrice, setImportPrice] = useState(DEFAULT_PRICE[defaultType]);
   const [monthNum, setMonthNum] = useState<number | ''>(''); // '' = read it from the sheet
   const [parsed, setParsed] = useState<ParsedFuelRow[] | null>(null);
   const [monthUsed, setMonthUsed] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [duplicates, setDuplicates] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setImportPrice(DEFAULT_PRICE[type]); }, [type]);
 
   const reset = () => { setFileName(''); setBuffer(null); setParsed(null); setError(''); setMonthNum(''); setDuplicates(new Set()); if (fileRef.current) fileRef.current.value = ''; };
   const close = () => { reset(); onClose(); };
@@ -454,6 +563,8 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
     setBusy(true);
     const rows = summary.ok.map(r => ({
       sub_account: subAccount, vehicle_id: r.vid, refuel_date: r.date, fuel_type: type, actual_litres: r.litres, notes: r.note,
+      cost_per_litre: Number(importPrice) > 0 ? Number(importPrice) : null,
+      total_cost: Number(importPrice) > 0 ? Number((r.litres * Number(importPrice)).toFixed(2)) : null,
     }));
     for (let i = 0; i < rows.length; i += 200) {
       const { error } = await supabase.from('sub_account_fuel').insert(rows.slice(i, i + 200));
@@ -468,7 +579,7 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
     showToast(`Imported ${rows.length} fuel entries (${summary.litres.toLocaleString()} L)`, 'success');
     setBusy(false);
     const ym = rows[0].refuel_date.slice(0, 7);
-    reset(); onClose(); onDone(ym);
+    reset(); onClose(); onDone(ym, type);
   };
 
   const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -486,7 +597,7 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
           {fileName && <span className="text-sm text-slate-600 flex items-center gap-1">{fileName}<button onClick={reset} aria-label="Clear file"><X className="h-3.5 w-3.5 text-slate-400" /></button></span>}
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
           <div>
             <label className="label">Fuel type</label>
             <select className="input" value={type} onChange={e => setType(e.target.value as FuelType)}>
@@ -503,6 +614,10 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
           <div>
             <label className="label">Year</label>
             <input type="number" className="input" value={year} onChange={e => setYear(Number(e.target.value) || new Date().getFullYear())} />
+          </div>
+          <div>
+            <label className="label">Price per litre (KES)</label>
+            <input type="number" step="0.01" min="0" className="input" placeholder="blank = no cost" value={importPrice} onChange={e => setImportPrice(e.target.value)} />
           </div>
         </div>
 
