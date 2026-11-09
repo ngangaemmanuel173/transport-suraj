@@ -8,7 +8,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { Modal } from '@/components/Modal';
 import { LoadingSpinner } from '@/components/Shared';
 import { useToast } from '@/components/Toast';
-import { parseFuelWorkbook, ParsedFuelRow, FuelType } from '@/lib/dailyFuelImport';
+import { parseFuelWorkbook, downloadFuelTemplate, ParsedFuelRow, FuelType } from '@/lib/dailyFuelImport';
 
 /**
  * Fuel page for CSL and Tarmal.
@@ -46,6 +46,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
   const [showAllTrucks, setShowAllTrucks] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [typesOpen, setTypesOpen] = useState(false);
+  const [templateMenu, setTemplateMenu] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -71,6 +72,12 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
 
   // Each truck uses diesel or petrol; only the trucks of the selected fuel are listed
   const typeVehicles = useMemo(() => vehicles.filter(v => (v.fuel_type || 'diesel') === fuelType), [vehicles, fuelType]);
+
+  const downloadTemplate = (kind: 'grid' | 'list') => {
+    const [y, m] = month.split('-').map(Number);
+    downloadFuelTemplate(kind, fuelType, typeVehicles.map(v => v.plate_number), y, m);
+    setTemplateMenu(false);
+  };
 
   // ---------- Daily entry ----------
   const dayRecs = useMemo(() => {
@@ -186,12 +193,34 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
           icon={<FuelIcon className="h-6 w-6" />}
           iconColor={portalColor}
         />
-        <button
-          onClick={() => setImportOpen(true)}
-          className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg shadow-sm hover:bg-slate-50 transition-colors"
-        >
-          <Upload className="h-4 w-4 text-slate-500" /> Import Excel
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <button
+              onClick={() => setTemplateMenu(o => !o)}
+              className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg shadow-sm hover:bg-slate-50 transition-colors"
+            >
+              <Download className="h-4 w-4 text-slate-500" /> Download Template
+            </button>
+            {templateMenu && (
+              <div className="absolute right-0 mt-1 w-72 bg-white border border-slate-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                <button className="block w-full text-left px-4 py-2.5 text-sm hover:bg-slate-50" onClick={() => { downloadTemplate('grid'); }}>
+                  <span className="font-semibold text-slate-800">Month sheet</span>
+                  <span className="block text-xs text-slate-500">Trucks down, days across. Your {FUEL_LABEL[fuelType].toLowerCase()} trucks are already listed.</span>
+                </button>
+                <button className="block w-full text-left px-4 py-2.5 text-sm hover:bg-slate-50 border-t border-slate-100" onClick={() => { downloadTemplate('list'); }}>
+                  <span className="font-semibold text-slate-800">List (DATE, VEHICLE, LITRES)</span>
+                  <span className="block text-xs text-slate-500">One row per fuelling.</span>
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => setImportOpen(true)}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg shadow-sm hover:bg-slate-50 transition-colors"
+          >
+            <Upload className="h-4 w-4 text-slate-500" /> Import Excel
+          </button>
+        </div>
       </div>
 
       <div className="card flex flex-wrap items-center gap-3 py-3 px-4">
