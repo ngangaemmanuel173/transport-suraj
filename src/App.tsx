@@ -18,6 +18,7 @@ import { MclFuel } from '@/pages/MclFuel';
 import { SubAccountTrips } from '@/pages/SubAccountTrips';
 import { SubAccountTallies } from '@/pages/SubAccountTallies';
 import { SubAccountFuel } from '@/pages/SubAccountFuel';
+import { DailyFuel } from '@/pages/DailyFuel';
 import { SparePartsV2 } from '@/pages/SparePartsV2';
 import { TyresPage } from '@/pages/TyresPage';
 import { CompliancePageFull } from '@/pages/CompliancePageFull';
@@ -210,7 +211,11 @@ function AppContent() {
       case 'live-monitor': return <LiveMonitor color={portal.color} subAccountFilter={portal.slug} />;
       case 'dashboard': return <Dashboard onViewAllContainers={() => setActiveTab('containers')} onViewCompliance={() => setActiveTab('compliance')} />;
       case 'trips': return portal.slug === 'mcl' ? <MclTrips portalColor={portal.color} /> : <SubAccountTrips mclArea={null} portalColor={portal.color} />;
-      case 'fuel': return portal.slug === 'mcl' ? <MclFuel portalColor={portal.color} /> : <SubAccountFuel mclArea={null} portalColor={portal.color} />;
+      case 'fuel':
+        if (portal.slug === 'mcl') return <MclFuel portalColor={portal.color} />;
+        // CSL and Tarmal record fuel once a day, per truck (no expected / actual). PN Mashru keeps the per-trip fuel page.
+        if (portal.slug === 'csl' || portal.slug === 'tarmal') return <DailyFuel portalColor={portal.color} />;
+        return <SubAccountFuel mclArea={null} portalColor={portal.color} />;
       case 'allowances': return <DriverAllowancesPage portalColor={portal.color} subAccount={portal.slug} />;
       case 'cost-reports': return <CostReportsPage portalColor={portal.color} lockedSubAccount={portal.slug} />;
       case 'tallies': return <SubAccountTallies mclArea={null} portalColor={portal.color} />;
