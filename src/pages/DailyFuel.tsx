@@ -45,13 +45,14 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [showAllTrucks, setShowAllTrucks] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [typesOpen, setTypesOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     const start = `${month}-01`;
     const end = `${month}-${pad(daysInMonth(month))}`;
     const [veh, fuel] = await Promise.all([
-      supabase.from('vehicles').select('id, plate_number').order('plate_number'),
+      supabase.from('vehicles').select('id, plate_number, fuel_type').order('plate_number'),
       supabase.from('sub_account_fuel')
         .select('id, vehicle_id, refuel_date, actual_litres, cost_per_litre, total_cost, fuel_type, notes')
         .gte('refuel_date', start).lte('refuel_date', end).order('refuel_date'),
@@ -67,6 +68,9 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
 
   const changeDate = (d: string) => { if (!d) return; setDate(d); setMonth(d.slice(0, 7)); };
   const changeMonth = (ym: string) => { setMonth(ym); setDate(ym === localToday().slice(0, 7) ? localToday() : `${ym}-01`); };
+
+  // Each truck uses diesel or petrol; only the trucks of the selected fuel are listed
+  const typeVehicles = useMemo(() => vehicles.filter(v => (v.fuel_type || 'diesel') === fuelType), [vehicles, fuelType]);
 
   // ---------- Daily entry ----------
   const dayRecs = useMemo(() => {
@@ -90,10 +94,10 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
     return list ? String(list.reduce((s, r) => s + (r.actual_litres ?? 0), 0)) : '';
   };
   const isLocked = (vid: string) => (dayRecs.get(vid)?.length ?? 0) > 1; // several entries for one day: edit them in the database, not here
-  const dirtyIds = vehicles.filter(v => !isLocked(v.id) && (inputs[v.id] ?? '') !== originalFor(v.id)).map(v => v.id);
+  const dirtyIds = typeVehicles.filter(v => !isLocked(v.id) && (inputs[v.id] ?? '') !== originalFor(v.id)).map(v => v.id);
 
-  const entryTotal = vehicles.reduce((s, v) => s + (Number(inputs[v.id]) || 0), 0);
-  const visibleVehicles = vehicles.filter(v => !search.trim() || normPlate(v.plate_number).includes(normPlate(search)));
+  const entryTotal = typeVehicles.reduce((s, v) => s + (Number(inputs[v.id]) || 0), 0);
+  const visibleVehicles = typeVehicles.filter(v => !search.trim() || normPlate(v.plate_number).includes(normPlate(search)));
 
   const saveDay = async () => {
     const bad = dirtyIds.find(id => { const t = (inputs[id] ?? '').trim(); return t !== '' && !(Number(t) > 0); });
@@ -151,7 +155,7 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
     const grand = Array.from(dayTotals.values()).reduce((a, b) => a + b, 0);
     return { byVeh, dayTotals, grand };
   }, [records, fuelType]);
-  const sheetVehicles = vehicles.filter(v => showAllTrucks || sheet.byVeh.has(v.id));
+  const sheetVehicles = vehicles.filter(v => sheet.byVeh.has(v.id) || (showAllTrucks && (v.fuel_type || 'diesel') === fuelType));
   const monthCost = records.filter(r => r.fuel_type === fuelType).reduce((s, r) => s + (r.total_cost ?? 0), 0);
 
   const exportCsv = () => {
@@ -224,14 +228,17 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
               <Search className="absolute left-2.5 top-[2.15rem] h-4 w-4 text-slate-400" />
               <input className="input pl-8 w-44" placeholder="e.g. KDA 255M" value={search} onChange={e => setSearch(e.target.value)} />
             </div>
+            <button className="btn-secondary text-sm" onClick={() => setTypesOpen(true)}>Set truck fuel types</button>
             <div className="ml-auto text-right">
               <p className="text-xs text-slate-400">{FUEL_LABEL[fuelType]} total for {date}</p>
               <p className="text-2xl font-bold text-slate-800">{fmt(entryTotal)} L</p>
             </div>
           </div>
 
-          {vehicles.length === 0 ? (
-            <p className="text-sm text-slate-500 py-6 text-center">No trucks in this sub-account yet. Add them on the Trucks / Vehicles page first.</p>
+          {typeVehicles.length === 0 ? (
+            <p className="text-sm text-slate-500 py-6 text-center">
+              No {FUEL_LABEL[fuelType].toLowerCase()} trucks yet. Use "Set truck fuel types" to choose which trucks use {FUEL_LABEL[fuelType].toLowerCase()}, or add trucks on the Trucks / Vehicles page first.
+            </p>
           ) : (
             <div className="table-wrapper overflow-x-auto">
               <table className="data-table">
@@ -328,6 +335,8 @@ export function DailyFuel({ portalColor }: { portalColor: string }) {
         </div>
       )}
 
+      <TruckTypesModal open={typesOpen} onClose={() => setTypesOpen(false)} vehicles={vehicles} onSaved={load} />
+
       <ImportModal
         open={importOpen}
         onClose={() => setImportOpen(false)}
@@ -421,6 +430,12 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
       const { error } = await supabase.from('sub_account_fuel').insert(rows.slice(i, i + 200));
       if (error) { showToast('Import failed: ' + error.message, 'error'); setBusy(false); return; }
     }
+    // The trucks on a petrol sheet are petrol trucks (and the same for diesel), so the fuel page lists them under the right fuel
+    const toSwitch = Array.from(new Set(summary.ok.map(r => r.vid))).filter(id => (vehicles.find(v => v.id === id)?.fuel_type || 'diesel') !== type);
+    if (toSwitch.length) {
+      const { error: vErr } = await supabase.from('vehicles').update({ fuel_type: type }).in('id', toSwitch);
+      if (vErr) showToast('Entries imported, but could not set truck fuel types: ' + vErr.message, 'error');
+    }
     showToast(`Imported ${rows.length} fuel entries (${summary.litres.toLocaleString()} L)`, 'success');
     setBusy(false);
     const ym = rows[0].refuel_date.slice(0, 7);
@@ -467,6 +482,9 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
         {summary && (
           <div className="rounded-lg border border-slate-200 p-3 space-y-2 text-sm">
             <p className="text-slate-800"><b>{summary.ok.length}</b> new entries to import · <b>{summary.litres.toLocaleString()} L</b> of {FUEL_LABEL[type].toLowerCase()}</p>
+            {summary.ok.some(r => (vehicles.find(v => v.id === r.vid)?.fuel_type || 'diesel') !== type) && (
+              <p className="text-slate-500">Trucks in this file that are not yet {FUEL_LABEL[type].toLowerCase()} trucks will be set to {FUEL_LABEL[type].toLowerCase()}.</p>
+            )}
             {summary.dup > 0 && <p className="text-slate-500">{summary.dup} already saved, will be skipped.</p>}
             {summary.missing.size > 0 && (
               <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2">
@@ -482,6 +500,54 @@ function ImportModal({ open, onClose, vehicles, subAccount, defaultType, portalC
           <button className="btn-primary" style={{ background: portalColor }} disabled={busy || !summary || summary.ok.length === 0} onClick={run}>
             {busy ? 'Importing...' : `Import ${summary?.ok.length ?? 0} entries`}
           </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+
+function TruckTypesModal({ open, onClose, vehicles, onSaved }: { open: boolean; onClose: () => void; vehicles: any[]; onSaved: () => void }) {
+  const { showToast } = useToast();
+  const [choice, setChoice] = useState<Record<string, FuelType>>({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) setChoice(Object.fromEntries(vehicles.map(v => [v.id, (v.fuel_type || 'diesel') as FuelType])));
+  }, [open, vehicles]);
+
+  const save = async () => {
+    setSaving(true);
+    for (const t of ['diesel', 'petrol'] as FuelType[]) {
+      const ids = vehicles.filter(v => choice[v.id] === t && (v.fuel_type || 'diesel') !== t).map(v => v.id);
+      if (!ids.length) continue;
+      const { error } = await supabase.from('vehicles').update({ fuel_type: t }).in('id', ids);
+      if (error) { showToast('Failed to save: ' + error.message, 'error'); setSaving(false); return; }
+    }
+    showToast('Truck fuel types saved', 'success');
+    setSaving(false);
+    onClose();
+    onSaved();
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Set truck fuel types" size="md">
+      <div className="space-y-3">
+        <p className="text-sm text-slate-500">Choose the fuel each truck uses. The Daily Entry and Month Sheet only list the trucks of the fuel you have selected.</p>
+        <div className="max-h-96 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
+          {vehicles.map(v => (
+            <div key={v.id} className="flex items-center justify-between px-3 py-2">
+              <span className="font-semibold text-slate-800">{v.plate_number}</span>
+              <select className="input py-1 w-32" value={choice[v.id] ?? 'diesel'} onChange={e => setChoice(p => ({ ...p, [v.id]: e.target.value as FuelType }))}>
+                <option value="diesel">Diesel</option><option value="petrol">Petrol</option>
+              </select>
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2">
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
         </div>
       </div>
     </Modal>
