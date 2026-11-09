@@ -93,3 +93,49 @@ export function parseFuelWorkbook(data: ArrayBuffer, year: number, monthOverride
   }
   return { kind: 'grid', rows, monthGuess };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Templates
+
+const MONTH_FULL = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+const ordinal = (n: number) => {
+  const s = n % 100 >= 11 && n % 100 <= 13 ? 'TH' : ({ 1: 'ST', 2: 'ND', 3: 'RD' } as Record<number, string>)[n % 10] ?? 'TH';
+  return `${n}${s}`;
+};
+
+/**
+ * Downloads an Excel template that the Import button reads straight back.
+ *  - 'grid': the monthly sheet (trucks down, days across, TTL FUEL row) with the given trucks already listed.
+ *  - 'list': DATE / VEHICLE / LITRES, one row per fuelling.
+ */
+export function downloadFuelTemplate(kind: 'grid' | 'list', fuel: FuelType, plates: string[], year: number, month: number): void {
+  const monthName = MONTH_FULL[month - 1];
+  const days = new Date(year, month, 0).getDate();
+  let aoa: any[][];
+  let sheetName: string;
+  let file: string;
+
+  if (kind === 'grid') {
+    const head = ['DATE', ...Array.from({ length: days }, (_, i) => ordinal(i + 1))];
+    const trucks = plates.length ? plates : ['KXX 000X'];
+    const body = trucks.map(p => [p]);
+    const first = 3, last = 2 + trucks.length;
+    const col = (i: number) => XLSX.utils.encode_col(i);
+    const total = ['TTL FUEL', ...Array.from({ length: days }, (_, i) => ({ t: 'n', f: `SUM(${col(i + 1)}${first}:${col(i + 1)}${last})` }))];
+    aoa = [[monthName, fuel.toUpperCase(), 'FUEL RECORD'], head, ...body, total];
+    sheetName = 'Fuel record';
+    file = `Fuel_Grid_Template_${fuel}_${monthName}.xlsx`;
+  } else {
+    const d = ordinal(1);
+    const mon = monthName.slice(0, 3);
+    aoa = [['DATE', 'VEHICLE', 'LITRES'], [`${d} ${mon}`, plates[0] ?? 'KXX 000X', 20], [`${ordinal(3)} ${mon}`, plates[0] ?? 'KXX 000X', 20]];
+    sheetName = 'Fuel list';
+    file = `Fuel_List_Template_${fuel}.xlsx`;
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 18 }, ...Array.from({ length: kind === 'grid' ? days : 2 }, () => ({ wch: 8 }))];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  XLSX.writeFile(wb, file);
+}
