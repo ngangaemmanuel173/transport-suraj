@@ -41,7 +41,7 @@ export const DRIVER_COMPLIANCE_COLUMNS = [
 export const ALLOWANCE_COLUMNS = ['allowance_date', 'amount', 'driver_name', 'truck_plate', 'trip_ref', 'notes'];
 
 export const DRIVER_COLUMNS = ['name', 'phone', 'id_number', 'license_number', 'nssf_number', 'sha_number', 'status'];
-export const VEHICLE_COLUMNS = ['plate_number', 'make', 'model', 'year', 'status'];
+export const VEHICLE_COLUMNS = ['plate_number', 'trailer_number', 'make', 'model', 'year', 'status'];
 
 // Reports & Costs. Each list follows the "Add" form of its tab, in the same order.
 // Revenue form: Month, Truck, Revenue, Notes. (Sub-account comes from the truck.)
