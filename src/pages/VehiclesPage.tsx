@@ -18,6 +18,7 @@ interface Vehicle {
   model: string | null;
   year: number | null;
   status: string;
+  trailer_number: string | null;
   sub_account: string;
 }
 
@@ -43,6 +44,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
   const [model, setModel] = useState('');
   const [year, setYear] = useState<number | ''>('');
   const [status, setStatus] = useState<string>('active');
+  const [trailerNumber, setTrailerNumber] = useState('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -73,6 +75,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
     setModel('');
     setYear('');
     setStatus('active');
+    setTrailerNumber('');
     setIsModalOpen(true);
   };
 
@@ -83,6 +86,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
     setModel(vehicle.model || '');
     setYear(vehicle.year || '');
     setStatus(vehicle.status || 'active');
+    setTrailerNumber(vehicle.trailer_number || '');
     setIsModalOpen(true);
   };
 
@@ -94,12 +98,12 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
     }
 
     const payload = {
-      plate_number: plateNumber.toUpperCase(),
+      plate_number: plateNumber.toUpperCase().trim(),
       make,
       model,
       year: year ? Number(year) : null,
       status,
-      sub_account: isMaster ? 'mcl' : subAccount,
+      trailer_number: trailerNumber.trim() ? trailerNumber.toUpperCase().trim() : null,
     };
 
     if (editingVehicle) {
@@ -112,7 +116,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
         loadData();
       }
     } else {
-      const { error } = await supabase.from('vehicles').insert([payload]);
+      const { error } = await supabase.from('vehicles').insert([{ ...payload, sub_account: subAccount }]);
       if (error) {
         showToast('Failed to add truck: ' + error.message, 'error');
       } else {
@@ -157,6 +161,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
       const matchesSearch =
         v.plate_number?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         v.make?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        v.trailer_number?.toLowerCase().includes(searchQuery.toLowerCase()) ||
         v.model?.toLowerCase().includes(searchQuery.toLowerCase());
 
       const matchesSubAccount =
@@ -175,7 +180,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <PageHeader
           title="Trucks / Vehicles Management"
-          subtitle="Manage your fleet trucks, plate numbers, makes, models, and operational status"
+          subtitle="Manage your fleet trucks, plate numbers, trailer numbers, makes, models, and operational status"
           icon={<TruckIcon className="h-6 w-6" />}
           iconColor={portalColor}
         />
@@ -266,7 +271,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
           <Search className="h-5 w-5 text-slate-400 shrink-0" />
           <input
             type="text"
-            placeholder="Search by plate number, make, or model..."
+            placeholder="Search by plate number, trailer number, make, or model..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full bg-transparent text-sm outline-none text-slate-800 placeholder-slate-400"
@@ -304,11 +309,12 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   <th className="px-5 py-3">Plate Number</th>
+                  <th className="px-5 py-3">Trailer Number</th>
                   <th className="px-5 py-3">Make & Model</th>
                   <th className="px-5 py-3">Year</th>
                   <th className="px-5 py-3">Sub-Account</th>
                   <th className="px-5 py-3">Status</th>
-                  {!isMaster && <th className="px-5 py-3 text-right">Actions</th>}
+                  <th className="px-5 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
@@ -320,6 +326,7 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
                       </div>
                       {v.plate_number}
                     </td>
+                    <td className="px-5 py-3.5 text-slate-700 font-medium">{v.trailer_number || '—'}</td>
                     <td className="px-5 py-3.5 text-slate-700 font-medium">
                       {v.make || '—'} {v.model ? `(${v.model})` : ''}
                     </td>
@@ -333,24 +340,24 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
                         {v.status === 'active' ? 'Active' : 'Inactive'}
                       </span>
                     </td>
-                    {!isMaster && (
-                      <td className="px-5 py-3.5 text-right space-x-2">
-                        <button 
-                          onClick={() => handleOpenEditModal(v)} 
-                          title="Update Truck"
-                          className="p-1.5 text-slate-500 hover:text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
-                        >
-                          <Edit className="h-4 w-4" />
-                        </button>
-                        <button 
-                          onClick={() => handleDeleteVehicle(v.id)} 
+                    <td className="px-5 py-3.5 text-right space-x-2">
+                      <button
+                        onClick={() => handleOpenEditModal(v)}
+                        title="Update Truck / Trailer"
+                        className="p-1.5 text-slate-500 hover:text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+                      >
+                        <Edit className="h-4 w-4" />
+                      </button>
+                      {!isMaster && (
+                        <button
+                          onClick={() => handleDeleteVehicle(v.id)}
                           title="Delete Truck"
                           className="p-1.5 text-slate-500 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
-                      </td>
-                    )}
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -365,6 +372,10 @@ export function VehiclesPage({ portalColor = '#0f172a', isMaster = false }: { po
           <div>
             <label className="block text-xs font-medium text-slate-600 mb-1">Plate Number *</label>
             <input type="text" required className="input" placeholder="e.g. KAA 123A" value={plateNumber} onChange={e => setPlateNumber(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Trailer Number</label>
+            <input type="text" className="input" placeholder="e.g. ZF 1234 (leave blank if none)" value={trailerNumber} onChange={e => setTrailerNumber(e.target.value)} />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
