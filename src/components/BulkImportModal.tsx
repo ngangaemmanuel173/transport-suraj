@@ -227,53 +227,21 @@ export function BulkImportModal({
     }
   };
 
-  // 3a. Direct import: parse and save row by row
-  const handleImport = async () => {
-    if (!rawText.trim()) {
-      showToast('Please upload a CSV file or paste data', 'error');
-      return;
-    }
-
-    setImporting(true);
-    try {
-      const built = buildRecords();
-      if (!built) return;
-      let success = 0, skipped = 0;
-      let error = built.errors.length;
-      let firstError = built.errors.find(e => e.message)?.message ?? '';
-
-      for (const { row, record } of built.items) {
-        if (insertRecord) {
-          const res = await insertRecord(record);
-          if (res.ok) success++;
-          else if (res.skipped) skipped++;
-          else {
-            error++;
-            if (!firstError) firstError = `Row ${row}: ${res.error || 'could not be saved'}`;
-          }
-          continue;
-        }
-
-        const { error: dbError } = await supabase.from(tableName).insert([record]);
-        if (dbError) {
-          console.error('Row insert error:', dbError.message);
-          if (!firstError) firstError = `Row ${row}: ${dbError.message}`;
-          error++;
-        } else {
-          success++;
-        }
-      }
-      report({ success, updated: 0, skipped, error, kept: 0, firstError });
-    } catch (err: any) {
-      showToast('Error processing file: ' + err.message, 'error');
-    } finally {
-      setImporting(false);
-    }
+  // Imports that do not merge into existing records (vehicles, drivers, fuel, tallies, ...) still get a preview:
+  // every readable row is listed as "New" and nothing is saved until the person confirms.
+  // They are saved the same way a direct import saves them (custom insertRecord, or a plain insert).
+  const isMerge = !!(planRecord && applyPlan);
+  const planOne = async (record: Record<string, any>, earlier: ImportPlan[]): Promise<PlanResult> =>
+    isMerge ? planRecord!(record, earlier) : { action: 'insert', record };
+  const applyOne = async (plan: ImportPlan): Promise<MergeResult> => {
+    if (isMerge) return applyPlan!(plan);
+    if (insertRecord) return insertRecord(plan.record);
+    const { error: dbError } = await supabase.from(tableName).insert([plan.record]);
+    return dbError ? { ok: false, error: dbError.message } : { ok: true };
   };
 
   // 3b. Preview: decide what would happen to every row, save nothing
   const handlePreview = async () => {
-    if (!planRecord) return;
     if (!rawText.trim()) {
       showToast('Please upload a CSV file or paste data', 'error');
       return;
@@ -284,7 +252,7 @@ export function BulkImportModal({
       if (!built) return;
       const out: ImportPlan[] = [];
       for (const { row, record } of built.items) {
-        const plan = await planRecord(record, out);
+        const plan = await planOne(record, out);
         out.push({ ...plan, row });
       }
       setPlanErrors(built.errors.filter(e => e.message).map(e => e.message as string));
@@ -299,7 +267,7 @@ export function BulkImportModal({
 
   // 3c. Confirm: carry out the previewed plans
   const handleConfirm = async () => {
-    if (!plans || !applyPlan) return;
+    if (!plans) return;
     setImporting(true);
     try {
       let success = 0, updated = 0, skipped = 0, kept = 0;
@@ -314,9 +282,10 @@ export function BulkImportModal({
           if (!firstError) firstError = `Row ${p.row}: ${p.message || 'could not be matched'}`;
           continue;
         }
-        const res = await applyPlan(p);
+        const res = await applyOne(p);
         if (res.ok && res.updated) updated++;
         else if (res.ok) success++;
+        else if (res.skipped) skipped++;
         else {
           error++;
           if (!firstError) firstError = `Row ${p.row}: ${res.error || 'could not be saved'}`;
@@ -331,6 +300,13 @@ export function BulkImportModal({
   };
 
   const planCount = (a: ImportPlan['action']) => (plans || []).filter(p => p.action === a).length;
+  // Short description of a row for imports that have no labelRecord: the first few filled-in values
+  const describeRecord = (rec: Record<string, any>) =>
+    Object.entries(rec)
+      .filter(([k, v]) => k !== 'sub_account' && v !== null && v !== undefined && v !== '')
+      .slice(0, 6)
+      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${String(v).length > 28 ? String(v).slice(0, 27) + '…' : v}`)
+      .join(' · ');
   const shortVal = (v: any) => { const t = String(v); return t.length > 28 ? t.slice(0, 27) + '…' : t; };
   const badge: Record<ImportPlan['action'], { label: string; cls: string }> = {
     insert: { label: 'New', cls: 'bg-emerald-100 text-emerald-700' },
@@ -441,7 +417,7 @@ export function BulkImportModal({
             )}
           </div>
 
-          {/* Preview of what will happen (only for imports that merge into existing records) */}
+          {/* Preview of what will happen. Nothing is saved until the person confirms. */}
           {plans && (
             <div className="space-y-3">
               <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">Step 3: Check what will change</span>
@@ -460,15 +436,16 @@ export function BulkImportModal({
               <div className="max-h-64 overflow-auto rounded-lg border border-slate-200">
                 <table className="w-full text-xs">
                   <thead className="bg-slate-50 text-slate-500 sticky top-0">
-                    <tr><th className="text-left p-2">Row</th><th className="text-left p-2">Trip</th><th className="text-left p-2">What happens</th></tr>
+                    <tr><th className="text-left p-2">Row</th><th className="text-left p-2">{isMerge ? 'Trip' : 'Record'}</th><th className="text-left p-2">What happens</th></tr>
                   </thead>
                   <tbody>
                     {plans.slice(0, 300).map((p, i) => (
                       <tr key={i} className="border-t border-slate-100 align-top">
                         <td className="p-2 text-slate-500">{p.row}</td>
-                        <td className="p-2 font-medium text-slate-700">{labelRecord ? labelRecord(p.record) : `${p.record.trip_date ?? ''}`}</td>
+                        <td className="p-2 font-medium text-slate-700">{isMerge ? (labelRecord ? labelRecord(p.record) : `${p.record.trip_date ?? ''}`) : (labelRecord ? labelRecord(p.record) : describeRecord(p.record)) || '—'}</td>
                         <td className="p-2 space-y-1">
                           <span className={`inline-block rounded px-1.5 py-0.5 font-semibold ${badge[p.action].cls}`}>{badge[p.action].label}</span>
+                          {!isMerge && p.action === 'insert' && labelRecord && <p className="text-slate-500">{describeRecord(p.record)}</p>}
                           {p.action === 'update' && p.patch && (
                             <p className="text-slate-600">Fills: {Object.entries(p.patch).map(([k, v]) => `${k.replace(/_/g, ' ')} = ${shortVal(v)}`).join('; ')}</p>
                           )}
@@ -485,7 +462,7 @@ export function BulkImportModal({
                 </table>
                 {plans.length > 300 && <p className="p-2 text-[11px] text-slate-400">Showing the first 300 of {plans.length} rows. All rows are imported when you confirm.</p>}
               </div>
-              <p className="text-[11px] text-slate-500">Values that are already saved are never overwritten. Nothing is saved until you press Confirm.</p>
+              <p className="text-[11px] text-slate-500">{isMerge ? 'Values that are already saved are never overwritten. ' : ''}Nothing is saved until you press Confirm.</p>
             </div>
           )}
 
@@ -498,7 +475,7 @@ export function BulkImportModal({
             Cancel
           </button>
           <button
-            onClick={planRecord ? (plans ? handleConfirm : handlePreview) : handleImport}
+            onClick={plans ? handleConfirm : handlePreview}
             disabled={importing || !rawText.trim() || (!!plans && planCount('insert') + planCount('update') === 0)}
             className="btn-primary flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ background: portalColor }}
@@ -506,22 +483,17 @@ export function BulkImportModal({
             {importing ? (
               <>
                 <div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                {plans ? 'Importing...' : planRecord ? 'Checking...' : 'Importing...'}
+                {plans ? 'Importing...' : 'Checking...'}
               </>
             ) : plans ? (
               <>
                 <FileText className="h-4 w-4" />
                 Confirm Import ({planCount('insert') + planCount('update')})
               </>
-            ) : planRecord ? (
+            ) : (
               <>
                 <Eye className="h-4 w-4" />
                 Preview Changes
-              </>
-            ) : (
-              <>
-                <FileText className="h-4 w-4" />
-                Import Records
               </>
             )}
           </button>
