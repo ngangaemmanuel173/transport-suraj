@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { useToast } from '@/components/Toast';
 import { SubAccount } from '@/lib/portals';
 import type { ImportPlan, PlanResult, MergeResult } from '@/lib/mergeImport';
+import { MERGE_RULES, planRecordMerge, applyRecordPlan } from '@/lib/recordMerge';
 
 interface BulkImportModalProps {
   open: boolean;
@@ -81,6 +82,8 @@ export function BulkImportModal({
   const [plans, setPlans] = useState<ImportPlan[] | null>(null);
   const [planErrors, setPlanErrors] = useState<string[]>([]);
   const [planErrorCount, setPlanErrorCount] = useState(0);
+  // Truck plates and driver names, so the preview shows them instead of internal ids
+  const [names, setNames] = useState<{ trucks: Record<string, string>; drivers: Record<string, string> }>({ trucks: {}, drivers: {} });
 
   if (!open) return null;
 
@@ -227,17 +230,38 @@ export function BulkImportModal({
     }
   };
 
-  // Imports that do not merge into existing records (vehicles, drivers, fuel, tallies, ...) still get a preview:
-  // every readable row is listed as "New" and nothing is saved until the person confirms.
-  // They are saved the same way a direct import saves them (custom insertRecord, or a plain insert).
-  const isMerge = !!(planRecord && applyPlan);
-  const planOne = async (record: Record<string, any>, earlier: ImportPlan[]): Promise<PlanResult> =>
-    isMerge ? planRecord!(record, earlier) : { action: 'insert', record };
+  // How a row is checked against what is already saved:
+  //  - trips pass their own planRecord / applyPlan (matches on truck + date + delivery number)
+  //  - every other import with a rule in recordMerge.ts matches on its own columns (plate, name, container no, ...)
+  //  - an import with no rule is simply listed as new
+  // In every case the person sees a preview first, and nothing is saved until they confirm.
+  const customMerge = !!(planRecord && applyPlan);
+  const autoRule = !customMerge ? MERGE_RULES[tableName] : undefined;
+  const isMerge = customMerge || !!autoRule;
+  const planOne = async (record: Record<string, any>, earlier: ImportPlan[]): Promise<PlanResult> => {
+    if (customMerge) return planRecord!(record, earlier);
+    if (autoRule) return planRecordMerge(autoRule, tableName, record, earlier);
+    return { action: 'insert', record };
+  };
   const applyOne = async (plan: ImportPlan): Promise<MergeResult> => {
-    if (isMerge) return applyPlan!(plan);
+    if (customMerge) return applyPlan!(plan);
+    if (autoRule) return applyRecordPlan(tableName, plan, insertRecord);
     if (insertRecord) return insertRecord(plan.record);
     const { error: dbError } = await supabase.from(tableName).insert([plan.record]);
     return dbError ? { ok: false, error: dbError.message } : { ok: true };
+  };
+
+  const loadNames = async () => {
+    try {
+      const [v, d] = await Promise.all([
+        supabase.from('vehicles').select('id, plate_number').limit(2000),
+        supabase.from('drivers').select('id, name').limit(2000),
+      ]);
+      setNames({
+        trucks: Object.fromEntries((v.data || []).map((x: any) => [x.id, x.plate_number])),
+        drivers: Object.fromEntries((d.data || []).map((x: any) => [x.id, x.name])),
+      });
+    } catch { /* the preview still works, it just shows fewer names */ }
   };
 
   // 3b. Preview: decide what would happen to every row, save nothing
@@ -250,6 +274,7 @@ export function BulkImportModal({
     try {
       const built = buildRecords();
       if (!built) return;
+      if (!customMerge) await loadNames();
       const out: ImportPlan[] = [];
       for (const { row, record } of built.items) {
         const plan = await planOne(record, out);
@@ -300,14 +325,21 @@ export function BulkImportModal({
   };
 
   const planCount = (a: ImportPlan['action']) => (plans || []).filter(p => p.action === a).length;
-  // Short description of a row for imports that have no labelRecord: the first few filled-in values
+  const shortVal = (v: any) => { const t = String(v); return t.length > 28 ? t.slice(0, 27) + '…' : t; };
+  // A field as the person reads it: ids become the truck plate / driver name
+  const pretty = (k: string, v: any): [string, string] => {
+    if (k === 'vehicle_id' || k === 'current_truck_id') return ['truck', names.trucks[v] || shortVal(v)];
+    if (k === 'driver_id') return ['driver', names.drivers[v] || shortVal(v)];
+    return [k.replace(/_/g, ' '), shortVal(v)];
+  };
+  const HIDDEN = new Set(['sub_account', 'mcl_area_id', 'entered_by', 'created_at', 'documents']);
+  // Short description of a row: its first few filled-in values
   const describeRecord = (rec: Record<string, any>) =>
     Object.entries(rec)
-      .filter(([k, v]) => k !== 'sub_account' && v !== null && v !== undefined && v !== '')
+      .filter(([k, v]) => !HIDDEN.has(k) && v !== null && v !== undefined && v !== '')
       .slice(0, 6)
-      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${String(v).length > 28 ? String(v).slice(0, 27) + '…' : v}`)
+      .map(([k, v]) => pretty(k, v).join(': '))
       .join(' · ');
-  const shortVal = (v: any) => { const t = String(v); return t.length > 28 ? t.slice(0, 27) + '…' : t; };
   const badge: Record<ImportPlan['action'], { label: string; cls: string }> = {
     insert: { label: 'New', cls: 'bg-emerald-100 text-emerald-700' },
     update: { label: 'Update', cls: 'bg-sky-100 text-sky-700' },
@@ -436,24 +468,23 @@ export function BulkImportModal({
               <div className="max-h-64 overflow-auto rounded-lg border border-slate-200">
                 <table className="w-full text-xs">
                   <thead className="bg-slate-50 text-slate-500 sticky top-0">
-                    <tr><th className="text-left p-2">Row</th><th className="text-left p-2">{isMerge ? 'Trip' : 'Record'}</th><th className="text-left p-2">What happens</th></tr>
+                    <tr><th className="text-left p-2">Row</th><th className="text-left p-2">{customMerge ? 'Trip' : 'Record'}</th><th className="text-left p-2">What happens</th></tr>
                   </thead>
                   <tbody>
                     {plans.slice(0, 300).map((p, i) => (
                       <tr key={i} className="border-t border-slate-100 align-top">
                         <td className="p-2 text-slate-500">{p.row}</td>
-                        <td className="p-2 font-medium text-slate-700">{isMerge ? (labelRecord ? labelRecord(p.record) : `${p.record.trip_date ?? ''}`) : (labelRecord ? labelRecord(p.record) : describeRecord(p.record)) || '—'}</td>
+                        <td className="p-2 font-medium text-slate-700">{customMerge ? (labelRecord ? labelRecord(p.record) : `${p.record.trip_date ?? ''}`) : (describeRecord(p.record) || '—')}</td>
                         <td className="p-2 space-y-1">
                           <span className={`inline-block rounded px-1.5 py-0.5 font-semibold ${badge[p.action].cls}`}>{badge[p.action].label}</span>
-                          {!isMerge && p.action === 'insert' && labelRecord && <p className="text-slate-500">{describeRecord(p.record)}</p>}
                           {p.action === 'update' && p.patch && (
-                            <p className="text-slate-600">Fills: {Object.entries(p.patch).map(([k, v]) => `${k.replace(/_/g, ' ')} = ${shortVal(v)}`).join('; ')}</p>
+                            <p className="text-slate-600">Fills: {Object.entries(p.patch).map(([k, v]) => pretty(k, v).join(' = ')).join('; ')}</p>
                           )}
                           {p.action === 'infile' && p.message && <p className="text-slate-500">{p.message}</p>}
                           {p.action === 'unchanged' && <p className="text-slate-500">Everything in this row is already saved.</p>}
                           {p.action === 'error' && <p className="text-red-600">{p.message}</p>}
                           {(p.kept?.length ?? 0) > 0 && (
-                            <p className="text-amber-700">Kept saved value: {p.kept!.map(k => `${k.field.replace(/_/g, ' ')} (saved ${shortVal(k.saved)}, file ${shortVal(k.file)})`).join('; ')}</p>
+                            <p className="text-amber-700">Kept saved value: {p.kept!.map(k => `${pretty(k.field, k.saved)[0]} (saved ${pretty(k.field, k.saved)[1]}, file ${pretty(k.field, k.file)[1]})`).join('; ')}</p>
                           )}
                         </td>
                       </tr>
@@ -462,7 +493,7 @@ export function BulkImportModal({
                 </table>
                 {plans.length > 300 && <p className="p-2 text-[11px] text-slate-400">Showing the first 300 of {plans.length} rows. All rows are imported when you confirm.</p>}
               </div>
-              <p className="text-[11px] text-slate-500">{isMerge ? 'Values that are already saved are never overwritten. ' : ''}Nothing is saved until you press Confirm.</p>
+              <p className="text-[11px] text-slate-500">{isMerge ? 'Records that are already saved are skipped, blanks on them are filled in, and values that are already saved are never overwritten. ' : ''}Nothing is saved until you press Confirm.</p>
             </div>
           )}
 
