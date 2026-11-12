@@ -147,10 +147,12 @@ export function AuthPage() {
       if (isSignUp) {
         if (!signupOpen) throw new Error('Sign-up is closed. Ask the Corporate Admin for access.');
         if (accountType === 'corporate_admin' && adminTaken) throw new Error('A Corporate Admin already exists.');
-        const { error } = await supabase.auth.signUp({
+        const { data: signUpData, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
+            // The confirmation link in the email brings the person back to this site.
+            emailRedirectTo: `${window.location.origin}/`,
             data: {
               full_name: fullName,
               role: accountType,
@@ -160,7 +162,13 @@ export function AuthPage() {
           },
         });
         if (error) throw error;
-        showToast('Account created successfully! You can now sign in.', 'success');
+        // With email confirmation switched on in Supabase there is no session until the link is clicked.
+        showToast(
+          signUpData?.session
+            ? 'Account created successfully! You can now sign in.'
+            : 'Account created. Check your email and click the confirmation link, then sign in.',
+          'success',
+        );
         setIsSignUp(false);
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({ email, password });
