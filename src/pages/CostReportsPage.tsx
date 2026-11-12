@@ -1,6 +1,6 @@
 import { useTruckDriverFilter, TruckDriverBar } from '@/components/TruckDriverFilter';
-import { useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
-import { FileText, Plus, Trash2, Download, Upload } from 'lucide-react';
+import { useEffect, useState, useCallback, useMemo, Fragment, type ReactNode } from 'react';
+import { FileText, Plus, Trash2, Download, Upload, ChevronDown, ChevronRight, Pencil, Check, X } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { LoadingSpinner } from '@/components/Shared';
@@ -113,7 +113,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const [toM, setToM] = useState(thisMonth());
   const [truck, setTruck] = useState('all');
   const [loading, setLoading] = useState(true);
-  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], costs: [], salaries: [], truckCosts: [] });
+  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], revenueEntries: [], costs: [], salaries: [], truckCosts: [] });
 
   const effSub = lockedSubAccount ?? sub;
   const tdf = useTruckDriverFilter(effSub);
@@ -122,7 +122,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     setLoading(true);
     const start = `${fromM}-01`, end = endOfMonth(toM);
     const scope = (q: any) => (effSub !== 'all' ? q.eq('sub_account', effSub) : q);
-    const [veh, drv, fuel, hist, parts, tyres, rev, costs, sal, tcs] = await Promise.all([
+    const [veh, drv, fuel, hist, parts, tyres, rev, revEnt, costs, sal, tcs] = await Promise.all([
       scope(supabase.from('vehicles').select('id, plate_number, sub_account').order('plate_number')),
       supabase.from('drivers').select('id, name'),
       scope(supabase.from('sub_account_fuel').select('vehicle_id, total_cost, refuel_date, sub_account').gte('refuel_date', start).lte('refuel_date', end)),
@@ -130,6 +130,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       scope(supabase.from('spare_parts_v2').select('id, part_name, unit_cost, sub_account')),
       scope(supabase.from('tyres_v2').select('id, serial_number, brand, unit_cost, fitted_date, current_truck_id, sub_account').gte('fitted_date', start).lte('fitted_date', end)),
       scope(supabase.from('truck_revenue').select('*').gte('period', start).lte('period', end)),
+      scope(supabase.from('truck_revenue_entries').select('*').gte('period', start).lte('period', end).order('created_at', { ascending: false })),
       scope(supabase.from('cost_entries').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
       scope(supabase.from('driver_salaries').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
       scope(supabase.from('truck_costs').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
@@ -138,7 +139,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     if (firstErr) toast(`Some data could not load: ${firstErr.error.message}`, 'error');
     setD({
       vehicles: veh.data || [], drivers: drv.data || [], fuel: fuel.data || [], hist: hist.data || [], parts: parts.data || [],
-      tyres: tyres.data || [], revenue: rev.data || [], costs: costs.data || [], salaries: sal.data || [], truckCosts: tcs.data || [],
+      tyres: tyres.data || [], revenue: rev.data || [], revenueEntries: revEnt.data || [], costs: costs.data || [], salaries: sal.data || [], truckCosts: tcs.data || [],
     });
     setLoading(false);
   }, [effSub, fromM, toM, toast]);
@@ -243,10 +244,30 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const subOfTruck = (vehicleId: string, fallback: string) => vehSub[vehicleId] || fallback;
 
   const addRevenue = async (sub: string, vehicleId: string, ym: string, amount: number, notes?: string | null) => {
-    const { error } = await supabase.rpc('add_truck_revenue', {
-      p_sub_account: sub, p_vehicle_id: vehicleId, p_period: `${ym}-01`, p_amount: withVat(amount), p_notes: notes || null, p_entered_by: who,
+    const { error } = await supabase.rpc('add_truck_revenue_entry', {
+      p_sub_account: sub, p_vehicle_id: vehicleId, p_period: `${ym}-01`, p_input: amount, p_amount: withVat(amount), p_notes: notes || null, p_entered_by: who,
     });
     return error;
+  };
+
+  // Edit / delete ONE revenue entry (the month total moves by that entry only)
+  const [openRev, setOpenRev] = useState<Record<string, boolean>>({});
+  const [editEnt, setEditEnt] = useState<{ id: string; amount: string; notes: string } | null>(null);
+  const saveEntryEdit = async () => {
+    if (!editEnt) return;
+    const amt = Number(editEnt.amount);
+    if (!(amt > 0)) return toast('Enter the revenue', 'error');
+    const { error } = await supabase.rpc('update_truck_revenue_entry', {
+      p_entry_id: editEnt.id, p_input: amt, p_amount: withVat(amt), p_notes: editEnt.notes.trim() || null,
+    });
+    if (error) return toast(error.message, 'error');
+    toast('Entry updated'); setEditEnt(null); load();
+  };
+  const deleteEntry = async (e: any) => {
+    if (!confirm(`Delete this entry of ${kes(Number(e.amount))}? Only this entry is removed; the rest of the month's revenue stays.`)) return;
+    const { error } = await supabase.rpc('delete_truck_revenue_entry', { p_entry_id: e.id });
+    if (error) return toast(error.message, 'error');
+    toast('Entry deleted'); load();
   };
   const addTruckCosts = async (sub: string, vehicleId: string, ym: string, c: { insurance: number; loan: number; driver_allowance: number }) => {
     const { error } = await supabase.rpc('add_truck_costs', {
@@ -475,13 +496,51 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
                 <div><label className={labelCls}>Revenue (KES)</label><input type="number" value={ef.amount} onChange={e => setEf({ ...ef, amount: e.target.value })} className={inputCls} /></div>
                 <div><label className={labelCls}>Notes</label><input value={ef.notes} onChange={e => setEf({ ...ef, notes: e.target.value })} className={inputCls} /></div>
               </EntryForm>
-              <Table head={['Month', 'Truck', 'Sub-account', 'Revenue', 'Notes', '']}>
-                {d.revenue.filter((r: any) => truck === 'all' || r.vehicle_id === truck).map((r: any) => (
-                  <tr key={r.id}><td>{monthLabel(r.period)}</td><td className="font-bold">{plate[r.vehicle_id] || '—'}</td><td>{subLabel(r.sub_account)}</td><Num v={Number(r.amount)} bold /><td>{r.notes || '—'}</td>
-                    <td><button onClick={() => remove('truck_revenue', r.id)} className="text-slate-400 hover:text-red-600" aria-label="Delete"><Trash2 className="h-4 w-4" /></button></td></tr>
-                ))}
+              <Table head={['', 'Month', 'Truck', 'Sub-account', 'Revenue', 'Notes', '']}>
+                {d.revenue.filter((r: any) => truck === 'all' || r.vehicle_id === truck).map((r: any) => {
+                  const ents = d.revenueEntries.filter((e: any) => e.revenue_id === r.id);
+                  const earlier = Number(r.amount) - ents.reduce((t: number, e: any) => t + Number(e.amount), 0);
+                  const open = !!openRev[r.id];
+                  return (
+                    <Fragment key={r.id}>
+                      <tr>
+                        <td><button onClick={() => setOpenRev(o => ({ ...o, [r.id]: !o[r.id] }))} className="text-slate-500 hover:text-slate-800" aria-label="Show entries">{open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button></td>
+                        <td>{monthLabel(r.period)}</td><td className="font-bold">{plate[r.vehicle_id] || '—'}</td><td>{subLabel(r.sub_account)}</td><Num v={Number(r.amount)} bold /><td>{r.notes || '—'}</td>
+                        <td><button onClick={() => { if (confirm('Delete ALL revenue for this truck and month (every entry)? To remove just one wrong amount, open the row with the arrow and delete that entry instead.')) remove('truck_revenue', r.id); }} className="text-slate-400 hover:text-red-600" aria-label="Delete whole month"><Trash2 className="h-4 w-4" /></button></td></tr>
+                      {open && (
+                        <tr><td colSpan={7} className="bg-slate-50">
+                          <div className="space-y-1 py-2">
+                            {ents.length === 0 && <p className="text-xs text-slate-500">No separate entries yet. New amounts you add will appear here, newest first, and can be edited or deleted one by one.</p>}
+                            {ents.map((e: any, i: number) => (
+                              <div key={e.id} className="flex flex-wrap items-center gap-3 text-sm">
+                                <span className="w-36 text-xs text-slate-500">{new Date(e.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}{i === 0 ? ' · latest' : ''}</span>
+                                {editEnt?.id === e.id ? (
+                                  <>
+                                    <input type="number" value={editEnt.amount} onChange={ev => setEditEnt({ ...editEnt, amount: ev.target.value })} className={inputCls + ' !w-32'} />
+                                    <input value={editEnt.notes} onChange={ev => setEditEnt({ ...editEnt, notes: ev.target.value })} placeholder="Notes" className={inputCls + ' !w-48'} />
+                                    <span className="text-xs text-slate-500">= {kes(withVat(Number(editEnt.amount) || 0))} incl. {vatPct}% tax</span>
+                                    <button onClick={saveEntryEdit} className="text-green-600" aria-label="Save"><Check className="h-4 w-4" /></button>
+                                    <button onClick={() => setEditEnt(null)} className="text-slate-400" aria-label="Cancel"><X className="h-4 w-4" /></button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="w-32 font-semibold tabular-nums">{kes(Number(e.amount))}</span>
+                                    <span className="text-xs text-slate-500">typed {kes(Number(e.amount_input))} · {e.entered_by || ''}{e.notes ? ` · ${e.notes}` : ''}</span>
+                                    <button onClick={() => setEditEnt({ id: e.id, amount: String(e.amount_input), notes: e.notes || '' })} className="text-slate-400 hover:text-slate-700" aria-label="Edit entry"><Pencil className="h-4 w-4" /></button>
+                                    <button onClick={() => deleteEntry(e)} className="text-slate-400 hover:text-red-600" aria-label="Delete entry"><Trash2 className="h-4 w-4" /></button>
+                                  </>
+                                )}
+                              </div>
+                            ))}
+                            {Math.abs(earlier) >= 1 && <p className="text-xs text-slate-500">Earlier total (saved before entries were tracked individually): {kes(earlier)}</p>}
+                          </div>
+                        </td></tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </Table>
-              <p className="text-xs text-slate-500">Saving again for the same truck and month adds to the earlier figure. To correct a mistake, delete the row and enter the right total.</p>
+              <p className="text-xs text-slate-500">Saving again for the same truck and month adds to the month's total. Click the arrow on a row to see each amount you entered: edit or delete just the wrong one. The bin on the row itself removes the whole month.</p>
             </div>
           )}
 
