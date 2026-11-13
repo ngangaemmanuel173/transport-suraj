@@ -128,7 +128,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       supabase.from('drivers').select('id, name'),
       scope(supabase.from('sub_account_fuel').select('vehicle_id, total_cost, refuel_date, sub_account').gte('refuel_date', start).lte('refuel_date', end)),
       supabase.from('spare_part_history').select('spare_part_id, action, action_date, truck_id').eq('action', 'installed').gte('action_date', start).lte('action_date', end),
-      scope(supabase.from('spare_parts_v2').select('id, part_name, serial_number, unit_cost, sub_account, status, current_truck_id, installed_date, last_changed_date')),
+      scope(supabase.from('spare_parts_v2').select('id, part_name, serial_number, unit_cost, sub_account, status, current_truck_id, installed_date, last_changed_date, purchase_date, created_at')),
       scope(supabase.from('tyres_v2').select('id, serial_number, brand, unit_cost, fitted_date, current_truck_id, sub_account').gte('fitted_date', start).lte('fitted_date', end)),
       scope(supabase.from('truck_revenue').select('*').gte('period', start).lte('period', end)),
       scope(supabase.from('truck_revenue_entries').select('*').gte('period', start).lte('period', end).order('created_at', { ascending: false })),
@@ -170,21 +170,22 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const driverName = useMemo(() => Object.fromEntries(d.drivers.map((x: any) => [x.id, x.name])), [d.drivers]);
   const partMap = useMemo(() => Object.fromEntries(d.parts.map((p: any) => [p.id, p])), [d.parts]);
 
-  // Spares cost = unit cost of each part installed in the period, charged to the truck it went on.
-  // Source 1: the install log (spare_part_history). Source 2: the spares table itself, so parts added by the
-  // form or Excel import (which write no log entry) still reach the report. Same part + same date is counted once.
+  // Spares cost = unit cost of every spare, counted in the month it was BOUGHT (purchase date), whatever its status.
+  // A spare that is on a truck is charged to that truck; store / office / unassigned spares go to "Unallocated (store/office)".
+  // Spares IN STORE with no purchase date are always included (in whatever period is viewed) so nothing in the store is missed.
+  // Any other spare with no purchase date uses its installed date, then the day it was added to the system.
   const periodStart = `${fromM}-01`, periodEnd = endOfMonth(toM);
-  const spareItems = useMemo(() => {
-    const fromHist = d.hist
-      .filter((h: any) => partMap[h.spare_part_id])
-      .map((h: any) => ({ key: `${h.spare_part_id}|${h.action_date}`, date: h.action_date, truck: h.truck_id || partMap[h.spare_part_id].current_truck_id || null, name: partMap[h.spare_part_id].part_name, cost: Number(partMap[h.spare_part_id].unit_cost || 0), sub: partMap[h.spare_part_id].sub_account }));
-    const seen = new Set(fromHist.map((x: any) => x.key));
-    const fromParts = d.parts
-      .filter((p: any) => p.status === 'in_use' && p.installed_date && p.installed_date >= periodStart && p.installed_date <= periodEnd && !seen.has(`${p.id}|${p.installed_date}`))
-      .map((p: any) => ({ key: `${p.id}|${p.installed_date}`, date: p.installed_date, truck: p.current_truck_id || null, name: `${p.part_name || 'Spare'} ${p.serial_number || ''}`.trim(), cost: Number(p.unit_cost || 0), sub: p.sub_account }));
-    return [...fromHist, ...fromParts];
-  }, [d.hist, d.parts, partMap, periodStart, periodEnd]);
-  // Spares / tyres costed in the period but not linked to a truck: shown so nothing is silently missing
+  const spareItems = useMemo(() => d.parts
+    .map((p: any) => {
+      const undatedStore = p.status === 'in_store' && !p.purchase_date;
+      const date = p.purchase_date || p.installed_date || (p.created_at ? String(p.created_at).slice(0, 10) : null);
+      return { p, undatedStore, date };
+    })
+    .filter((x: any) => x.undatedStore || (x.date && x.date >= periodStart && x.date <= periodEnd))
+    .map((x: any) => ({ date: x.date || '—', truck: x.p.current_truck_id || null, name: `${x.p.part_name || 'Spare'} ${x.p.serial_number || ''}`.trim() + (x.undatedStore ? ' (store, no purchase date)' : ''), cost: Number(x.p.unit_cost || 0), sub: x.p.sub_account, status: x.p.status, undatedStore: x.undatedStore })),
+  [d.parts, periodStart, periodEnd]);
+  const undatedStoreTotal = useMemo(() => spareItems.filter((i: any) => i.undatedStore).reduce((a: number, i: any) => a + i.cost, 0), [spareItems]);
+  // Spares bought in the period that are not on a truck (store, office, repair, retired)
   const sparesNoTruck = useMemo(() => spareItems.filter((i: any) => !i.truck).reduce((a: number, i: any) => a + i.cost, 0), [spareItems]);
   // MCL auto revenue per truck and month: [{ vehicle_id, month, trips, tons, amount }]
   const mclAuto = useMemo(() => {
@@ -244,7 +245,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     for (const k of ['revenue', 'fuel', 'spares', 'tyres', 'salaries', 'insurance', 'loans', 'allowance', 'other', 'cost', 'profit']) a[k] = (a[k] || 0) + r[k];
     return a;
   }, {} as any);
-  const unallocated = d.costs.filter((c: any) => !c.vehicle_id).reduce((a: number, c: any) => a + Number(c.amount || 0), 0)
+  const unallocated = (truck === 'all' ? sparesNoTruck : 0) + d.costs.filter((c: any) => !c.vehicle_id).reduce((a: number, c: any) => a + Number(c.amount || 0), 0)
     + salariesF.filter((c: any) => !c.vehicle_id).reduce((a: number, c: any) => a + Number(c.amount || 0), 0);
 
   const exportCsv = () => {
@@ -537,9 +538,9 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
                   <td className={`text-right tabular-nums ${(tot.profit || 0) < 0 ? 'text-red-600' : 'text-emerald-700'}`}>{kes(tot.profit || 0)}</td></tr>
               </Table>
               <p className="text-xs text-slate-500">
-                Costs not tied to a truck (whole sub-account overheads, financial and employment costs, unallocated salaries): <b>{kes(unallocated)}</b>.
+                Costs not tied to a truck (whole sub-account overheads, financial and employment costs, unallocated salaries, spares bought for store/office): <b>{kes(unallocated)}</b>.
                 Profit after these: <b>{kes((tot.profit || 0) - (truck === 'all' ? unallocated : 0))}</b>{truck !== 'all' && ' (shown for all trucks only)'}.
-                Spares are counted when installed; tyres when fitted; fuel from the Fuel page; revenue from the Revenue tab; insurance, loans and driver allowance from the Insurance, Loans &amp; Allowance tab.
+                Spares are counted in the month they are bought (purchase date), on the truck they are fitted to or under store/office; tyres when fitted; fuel from the Fuel page; revenue from the Revenue tab; insurance, loans and driver allowance from the Insurance, Loans &amp; Allowance tab.
               </p>
             </div>
           )}
@@ -661,20 +662,19 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
 
           {view === 'maintenance' && (
             <div className="space-y-4">
-              <p className="text-sm text-slate-500">Spares, tyres and fuel per truck.</p>
-              {sparesNoTruck > 0 && truck === 'all' && (
-                <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Spares worth <b>{kes(sparesNoTruck)}</b> are marked In Use but have no truck, so they cannot be charged to a truck. Open them in the Spares account and set the truck (the plate must match a truck in the Trucks list).</p>
-              )}
+              <p className="text-sm text-slate-500">Spares, tyres and fuel per truck. Spares are counted in the month they were bought; ones not fitted to a truck show as Unallocated (store/office). Spares in store with no purchase date are always included. Any other spare with no purchase date uses its installed date, or the day it was added.</p>
+              {undatedStoreTotal > 0 && truck === 'all' && <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{kes(undatedStoreTotal)} of the store spares below have no purchase date, so they appear in every period you view. Add a purchase date to a spare to count it in one month only.</p>}
               <Table head={['Truck', 'Spares', 'Tyres', 'Fuel', 'Total']}>
                 {rows.map((r: any) => <tr key={r.id}><td className="font-bold">{r.plate}</td><Num v={r.spares} /><Num v={r.tyres} /><Num v={r.fuel} /><Num v={r.spares + r.tyres + r.fuel} bold /></tr>)}
-                <tr className="bg-slate-50 font-bold"><td>TOTAL</td><Num v={tot.spares || 0} bold /><Num v={tot.tyres || 0} bold /><Num v={tot.fuel || 0} bold /><Num v={(tot.spares || 0) + (tot.tyres || 0) + (tot.fuel || 0)} bold /></tr>
+                {truck === 'all' && sparesNoTruck > 0 && <tr><td className="font-bold italic">Unallocated (store/office)</td><Num v={sparesNoTruck} /><Num v={0} /><Num v={0} /><Num v={sparesNoTruck} bold /></tr>}
+                <tr className="bg-slate-50 font-bold"><td>TOTAL</td><Num v={(tot.spares || 0) + (truck === 'all' ? sparesNoTruck : 0)} bold /><Num v={tot.tyres || 0} bold /><Num v={tot.fuel || 0} bold /><Num v={(tot.spares || 0) + (truck === 'all' ? sparesNoTruck : 0) + (tot.tyres || 0) + (tot.fuel || 0)} bold /></tr>
               </Table>
               <h3 className="text-sm font-bold text-slate-700">Spares and tyres detail</h3>
               <Table head={['Date', 'Type', 'Item', 'Truck', 'Sub-account', 'Cost']}>
                 {[...spareItems.map((i: any) => ({ ...i, type: 'Spare' })), ...tyreItems.map((i: any) => ({ ...i, type: 'Tyre' }))]
                   .filter((i: any) => truck === 'all' || i.truck === truck)
                   .sort((a: any, b: any) => String(b.date).localeCompare(String(a.date)))
-                  .map((i: any, n: number) => <tr key={n}><td>{i.date}</td><td>{i.type}</td><td>{i.name}</td><td>{plate[i.truck] || '—'}</td><td>{subLabel(i.sub || vehSub[i.truck] || '')}</td><Num v={i.cost} /></tr>)}
+                  .map((i: any, n: number) => <tr key={n}><td>{i.date}</td><td>{i.type}</td><td>{i.name}</td><td>{plate[i.truck] || (i.type === 'Spare' ? 'Store/office' : '—')}</td><td>{subLabel(i.sub || vehSub[i.truck] || '')}</td><Num v={i.cost} /></tr>)}
               </Table>
             </div>
           )}
