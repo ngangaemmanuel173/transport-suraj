@@ -114,7 +114,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const [toM, setToM] = useState(thisMonth());
   const [truck, setTruck] = useState('all');
   const [loading, setLoading] = useState(true);
-  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], mclTrips: [], mclRates: [], revenueEntries: [], costs: [], salaries: [], truckCosts: [] });
+  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], longTrips: [], mclTrips: [], mclRates: [], revenueEntries: [], costs: [], salaries: [], truckCosts: [] });
 
   const effSub = lockedSubAccount ?? sub;
   const tdf = useTruckDriverFilter(effSub);
@@ -145,12 +145,19 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       mclTrips.push(...((pg.data as any[]) || []));
       if (!pg.data || pg.data.length < 1000) break;
     }
+    // PN Mashru / Tarmal: the amount entered on each trip, by the date it was loaded
+    const longTrips: any[] = [];
+    for (const [table, src] of [['pn_mashru_trips', 'PN Mashru'], ['tarmal_trips', 'Tarmal']] as const) {
+      const lt = await supabase.from(table).select('vehicle_id, date_loaded, trip_amount').not('trip_amount', 'is', null).gte('date_loaded', start).lte('date_loaded', end).range(0, 4999);
+      if (lt.error) toast(`${src} trip amounts could not load (run the trip_amount migration): ${lt.error.message}`, 'error');
+      else longTrips.push(...((lt.data as any[]) || []).map(r => ({ ...r, src })));
+    }
     const mclRatesRes = await supabase.from('mcl_rates').select('*');
     const mclRates = (mclRatesRes.data || []).map((r: any) => ({ ...r, rate_per_ton: Number(r.rate_per_ton), fuel_litres: Number(r.fuel_litres) }));
     const firstErr = [veh, fuel, hist, parts, tyres, rev, costs, sal, tcs].find((r: any) => r.error) as any;
     if (firstErr) toast(`Some data could not load: ${firstErr.error.message}`, 'error');
     setD({
-      vehicles: veh.data || [], drivers: drv.data || [], fuel: fuel.data || [], hist: hist.data || [], parts: parts.data || [], mclTrips, mclRates,
+      vehicles: veh.data || [], drivers: drv.data || [], fuel: fuel.data || [], hist: hist.data || [], parts: parts.data || [], mclTrips, longTrips, mclRates,
       tyres: tyres.data || [], revenue: rev.data || [], revenueEntries: revEnt.data || [], costs: costs.data || [], salaries: sal.data || [], truckCosts: tcs.data || [],
     });
     setLoading(false);
@@ -188,12 +195,19 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       TRIP_NUMS.forEach(n => { weights[n] = Number(t[`trip_${n}`]) || 0; });
       const tot = dayTotals({ weights, sources: parseSources(t.notes) }, date, d.mclRates as McRate[]);
       if (!tot.trips) continue;
-      const key = `${t.vehicle_id}|${date.slice(0, 7)}`;
-      const m = map[key] || (map[key] = { vehicle_id: t.vehicle_id, month: date.slice(0, 7), trips: 0, tons: 0, amount: 0 });
+      const key = `${t.vehicle_id}|${date.slice(0, 7)}|MCL`;
+      const m = map[key] || (map[key] = { vehicle_id: t.vehicle_id, month: date.slice(0, 7), src: 'MCL', trips: 0, tons: 0, amount: 0 });
       m.trips += tot.trips; m.tons += tot.tons; m.amount += tot.revenue;
     }
+    for (const t of d.longTrips) {
+      if (!t.vehicle_id || !t.date_loaded) continue;
+      const month = String(t.date_loaded).slice(0, 7);
+      const key = `${t.vehicle_id}|${month}|${t.src}`;
+      const m = map[key] || (map[key] = { vehicle_id: t.vehicle_id, month, src: t.src, trips: 0, tons: 0, amount: 0 });
+      m.trips += 1; m.amount += Number(t.trip_amount) || 0;
+    }
     return Object.values(map);
-  }, [d.mclTrips, d.mclRates]);
+  }, [d.mclTrips, d.longTrips, d.mclRates]);
   const mclByTruck = useMemo(() => {
     const o: Record<string, number> = {};
     for (const m of mclAuto as any[]) o[m.vehicle_id] = (o[m.vehicle_id] || 0) + m.amount;
@@ -529,14 +543,14 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
 
           {view === 'revenue' && (
             <div className="space-y-4">
-              <h3 className="text-sm font-bold text-slate-700">Automatic revenue (MCL trip sheets)</h3>
-              <p className="text-xs text-slate-500">Taken live from the MCL Daily Trip Sheet: tons x the shipping rate of each trip's material source. Nothing to enter here; for these trucks it replaces the manual amounts below.</p>
-              <Table head={['Month', 'Truck', 'Trips', 'Tons', 'Revenue']}>
+              <h3 className="text-sm font-bold text-slate-700">Automatic revenue (from trips)</h3>
+              <p className="text-xs text-slate-500">MCL: taken live from the Daily Trip Sheet (tons x the rate of each trip's material source). PN Mashru and Tarmal: the Trip Amount entered on each trip, by the date loaded. Nothing to enter here; for these trucks it replaces the manual amounts below.</p>
+              <Table head={['Month', 'Truck', 'Source', 'Trips', 'Tons', 'Revenue']}>
                 {(mclAuto as any[]).filter(m => plate[m.vehicle_id] && (truck === 'all' || m.vehicle_id === truck)).sort((a, b) => b.month.localeCompare(a.month) || String(plate[a.vehicle_id]).localeCompare(String(plate[b.vehicle_id])))
-                  .map(m => <tr key={m.vehicle_id + m.month}><td>{m.month}</td><td className="font-bold">{plate[m.vehicle_id] || '—'}</td><td>{m.trips}</td><td>{m.tons.toFixed(2)}</td><Num v={Math.round(m.amount)} bold /></tr>)}
-                {(mclAuto as any[]).length === 0 && <tr><td colSpan={5} className="text-center text-slate-500">No MCL trips in this period.</td></tr>}
+                  .map(m => <tr key={m.vehicle_id + m.month + m.src}><td>{m.month}</td><td className="font-bold">{plate[m.vehicle_id] || '—'}</td><td>{m.src}</td><td>{m.trips}</td><td>{m.src === 'MCL' ? m.tons.toFixed(2) : '—'}</td><Num v={Math.round(m.amount)} bold /></tr>)}
+                {(mclAuto as any[]).length === 0 && <tr><td colSpan={6} className="text-center text-slate-500">No trips with revenue in this period.</td></tr>}
               </Table>
-              <h3 className="text-sm font-bold text-slate-700">Manual revenue (other sub-accounts)</h3>
+              <h3 className="text-sm font-bold text-slate-700">Manual revenue (CSL and trucks without trip revenue)</h3>
               <ImportBar template="truck_revenue" onImport={() => setBulk('revenue')} />
               <EntryForm color={portalColor} onSave={saveRevenue} saving={saving} note={(() => {
                 const amt = Number(ef.amount);
