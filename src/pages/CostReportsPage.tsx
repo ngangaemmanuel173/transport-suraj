@@ -145,9 +145,9 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       mclTrips.push(...((pg.data as any[]) || []));
       if (!pg.data || pg.data.length < 1000) break;
     }
-    // PN Mashru / Tarmal: the amount entered on each trip, by the date it was loaded
+    // PN Mashru: the amount entered on each trip, by the date it was loaded
     const longTrips: any[] = [];
-    for (const [table, src] of [['pn_mashru_trips', 'PN Mashru'], ['tarmal_trips', 'Tarmal']] as const) {
+    for (const [table, src] of [['pn_mashru_trips', 'PN Mashru']] as const) {
       const lt = await supabase.from(table).select('vehicle_id, date_loaded, trip_amount').not('trip_amount', 'is', null).gte('date_loaded', start).lte('date_loaded', end).range(0, 4999);
       if (lt.error) toast(`${src} trip amounts could not load (run the trip_amount migration): ${lt.error.message}`, 'error');
       else longTrips.push(...((lt.data as any[]) || []).map(r => ({ ...r, src })));
@@ -208,6 +208,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     }
     return Object.values(map);
   }, [d.mclTrips, d.longTrips, d.mclRates]);
+  const autoKeys = useMemo(() => new Set((mclAuto as any[]).map(m => `${m.vehicle_id}|${m.month}`)), [mclAuto]);
   const mclByTruck = useMemo(() => {
     const o: Record<string, number> = {};
     for (const m of mclAuto as any[]) o[m.vehicle_id] = (o[m.vehicle_id] || 0) + m.amount;
@@ -223,7 +224,9 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     const sum = (arr: any[], key: string, id: string, f: string) => arr.filter(x => x[key] === id).reduce((a, x) => a + Number(x[f] || 0), 0);
     return trucks.map((v: any) => {
       // trucks with MCL trip-sheet revenue use it automatically; others use the Revenue tab entries
-      const revenue = mclByTruck[v.id] ? Math.round(mclByTruck[v.id]) : sum(d.revenue, 'vehicle_id', v.id, 'amount');
+      // per month: trip revenue (MCL / PN Mashru) when the truck has any, otherwise that month's manual revenue
+      const manualMonths = d.revenue.filter((x: any) => x.vehicle_id === v.id && !autoKeys.has(`${v.id}|${String(x.period).slice(0, 7)}`));
+      const revenue = Math.round(mclByTruck[v.id] || 0) + manualMonths.reduce((acc: number, x: any) => acc + Number(x.amount || 0), 0);
       const fuel = sum(d.fuel, 'vehicle_id', v.id, 'total_cost');
       const spares = sum(spareItems, 'truck', v.id, 'cost');
       const tyres = sum(tyreItems, 'truck', v.id, 'cost');
@@ -235,7 +238,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       const cost = fuel + spares + tyres + salaries + other + insurance + loans + allowance;
       return { id: v.id, plate: v.plate_number, sub: v.sub_account, revenue, fuel, spares, tyres, salaries, insurance, loans, allowance, other, cost, profit: revenue - cost };
     });
-  }, [d, truck, spareItems, tyreItems, salariesF, tdf.okRow, mclByTruck]);
+  }, [d, truck, spareItems, tyreItems, salariesF, tdf.okRow, mclByTruck, autoKeys]);
 
   const tot = rows.reduce((a: any, r: any) => {
     for (const k of ['revenue', 'fuel', 'spares', 'tyres', 'salaries', 'insurance', 'loans', 'allowance', 'other', 'cost', 'profit']) a[k] = (a[k] || 0) + r[k];
@@ -544,13 +547,13 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
           {view === 'revenue' && (
             <div className="space-y-4">
               <h3 className="text-sm font-bold text-slate-700">Automatic revenue (from trips)</h3>
-              <p className="text-xs text-slate-500">MCL: taken live from the Daily Trip Sheet (tons x the rate of each trip's material source). PN Mashru and Tarmal: the Trip Amount entered on each trip, by the date loaded. Nothing to enter here; for these trucks it replaces the manual amounts below.</p>
+              <p className="text-xs text-slate-500">MCL: taken live from the Daily Trip Sheet (tons x the rate of each trip's material source). PN Mashru: the Trip Amount entered on each trip, by the date loaded. Nothing to enter here; for the months shown here it replaces any manual amount for the same truck and month.</p>
               <Table head={['Month', 'Truck', 'Source', 'Trips', 'Tons', 'Revenue']}>
                 {(mclAuto as any[]).filter(m => plate[m.vehicle_id] && (truck === 'all' || m.vehicle_id === truck)).sort((a, b) => b.month.localeCompare(a.month) || String(plate[a.vehicle_id]).localeCompare(String(plate[b.vehicle_id])))
                   .map(m => <tr key={m.vehicle_id + m.month + m.src}><td>{m.month}</td><td className="font-bold">{plate[m.vehicle_id] || '—'}</td><td>{m.src}</td><td>{m.trips}</td><td>{m.src === 'MCL' ? m.tons.toFixed(2) : '—'}</td><Num v={Math.round(m.amount)} bold /></tr>)}
                 {(mclAuto as any[]).length === 0 && <tr><td colSpan={6} className="text-center text-slate-500">No trips with revenue in this period.</td></tr>}
               </Table>
-              <h3 className="text-sm font-bold text-slate-700">Manual revenue (CSL and trucks without trip revenue)</h3>
+              <h3 className="text-sm font-bold text-slate-700">Manual revenue (CSL, Tarmal and any truck without trip revenue)</h3>
               <ImportBar template="truck_revenue" onImport={() => setBulk('revenue')} />
               <EntryForm color={portalColor} onSave={saveRevenue} saving={saving} note={(() => {
                 const amt = Number(ef.amount);
