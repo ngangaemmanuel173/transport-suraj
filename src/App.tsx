@@ -81,9 +81,10 @@ function SubAccountDashboardWrapper({ subAccount, onViewAllContainers, onViewCom
   }, [subAccount]);
 
   return (
-    <Dashboard 
+       <Dashboard 
       key={subAccount} 
-      onViewAllContainers={onViewAllContainers} 
+      subAccount={subAccount}
+      onViewAllContainers={onViewAllContainers}
       onViewCompliance={onViewCompliance} 
     />
   );
