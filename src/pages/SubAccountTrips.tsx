@@ -74,6 +74,7 @@ type FormState = {
   item: string;
   delivery_no: string;
   invoice_no: string;
+  trip_amount: string;
   date_loaded: string;
   date_delivered: string;
   product: string;
@@ -93,6 +94,7 @@ const emptyForm = (): FormState => ({
   item: '',
   delivery_no: '',
   invoice_no: '',
+  trip_amount: '',
   date_loaded: new Date().toISOString().split('T')[0],
   date_delivered: new Date().toISOString().split('T')[0],
   product: '',
@@ -171,6 +173,7 @@ export function SubAccountTrips({ mclArea, portalColor }: { mclArea: MCLArea | n
       item: t.item || t.product || '',
       delivery_no: t.delivery_no || '',
       invoice_no: t.invoice_no || '',
+      trip_amount: t.trip_amount != null ? String(t.trip_amount) : '',
       date_loaded: t.date_loaded || t.trip_date || new Date().toISOString().split('T')[0],
       date_delivered: t.date_delivered || t.trip_date || new Date().toISOString().split('T')[0],
       product: t.product || t.item || '',
@@ -205,6 +208,7 @@ export function SubAccountTrips({ mclArea, portalColor }: { mclArea: MCLArea | n
       payload.item = form.item;
       payload.delivery_no = form.delivery_no;
       payload.invoice_no = form.invoice_no;
+      payload.trip_amount = form.trip_amount !== '' ? Number(form.trip_amount) : null;
       payload.date_loaded = form.date_loaded;
       payload.date_delivered = form.date_delivered;
       payload.days_taken = calculateDays(form.date_loaded, form.date_delivered);
@@ -321,6 +325,7 @@ export function SubAccountTrips({ mclArea, portalColor }: { mclArea: MCLArea | n
                 <th>Item</th>
                 <th>Delivery No.</th>
                 <th>Invoice No.</th>
+                <th className="text-right">Amount (KES)</th>
                 <th>Date Loaded</th>
                 <th>Date Delivered</th>
                 <th>Days Taken</th>
@@ -338,6 +343,7 @@ export function SubAccountTrips({ mclArea, portalColor }: { mclArea: MCLArea | n
                   <td className="text-slate-700">{t.item || '—'}</td>
                   <td className="text-slate-600 font-mono">{t.delivery_no || '—'}</td>
                   <td className="text-slate-600 font-mono">{t.invoice_no || '—'}</td>
+                  <td className="text-right font-semibold text-slate-800">{t.trip_amount != null ? Number(t.trip_amount).toLocaleString() : '—'}</td>
                   <td className="text-slate-600">{t.date_loaded || '—'}</td>
                   <td className="text-slate-600">{t.date_delivered || '—'}</td>
                   <td className="font-bold text-blue-700">{t.days_taken ?? calculateDays(t.date_loaded, t.date_delivered)} days</td>
@@ -476,6 +482,10 @@ export function SubAccountTrips({ mclArea, portalColor }: { mclArea: MCLArea | n
                 <input type="text" className="input" value={form.invoice_no} onChange={e => setForm({ ...form, invoice_no: e.target.value })} />
               </div>
               <div>
+                <label className="label">Trip Amount (KES)</label>
+                <input type="number" min="0" step="0.01" className="input" placeholder="Price for this trip" value={form.trip_amount} onChange={e => setForm({ ...form, trip_amount: e.target.value })} />
+              </div>
+              <div>
                 <label className="label">Date Loaded</label>
                 <input type="date" className="input" value={form.date_loaded} onChange={e => setForm({ ...form, date_loaded: e.target.value })} />
               </div>
@@ -578,6 +588,7 @@ export function SubAccountTrips({ mclArea, portalColor }: { mclArea: MCLArea | n
             r.net_tallage = Number(r.net_tallage) || 0;
             r.status = r.status || 'completed';
           }
+          if (isLongDistance && 'trip_amount' in r) r.trip_amount = String(r.trip_amount ?? '').trim() === '' ? null : Number(String(r.trip_amount).replace(/,/g, '')) || 0;
           return r;
         }}
         // CSL: preview first. A row for a trip that is already saved only fills in what is blank there.
