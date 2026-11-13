@@ -127,7 +127,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       supabase.from('drivers').select('id, name'),
       scope(supabase.from('sub_account_fuel').select('vehicle_id, total_cost, refuel_date, sub_account').gte('refuel_date', start).lte('refuel_date', end)),
       supabase.from('spare_part_history').select('spare_part_id, action, action_date, truck_id').eq('action', 'installed').gte('action_date', start).lte('action_date', end),
-      scope(supabase.from('spare_parts_v2').select('id, part_name, unit_cost, sub_account')),
+      scope(supabase.from('spare_parts_v2').select('id, part_name, serial_number, unit_cost, sub_account, status, current_truck_id, installed_date, last_changed_date')),
       scope(supabase.from('tyres_v2').select('id, serial_number, brand, unit_cost, fitted_date, current_truck_id, sub_account').gte('fitted_date', start).lte('fitted_date', end)),
       scope(supabase.from('truck_revenue').select('*').gte('period', start).lte('period', end)),
       scope(supabase.from('truck_revenue_entries').select('*').gte('period', start).lte('period', end).order('created_at', { ascending: false })),
@@ -151,10 +151,22 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const driverName = useMemo(() => Object.fromEntries(d.drivers.map((x: any) => [x.id, x.name])), [d.drivers]);
   const partMap = useMemo(() => Object.fromEntries(d.parts.map((p: any) => [p.id, p])), [d.parts]);
 
-  // Spares cost = unit cost of each part installed in the period, charged to the truck it went on
-  const spareItems = useMemo(() => d.hist
-    .filter((h: any) => partMap[h.spare_part_id])
-    .map((h: any) => ({ date: h.action_date, truck: h.truck_id, name: partMap[h.spare_part_id].part_name, cost: Number(partMap[h.spare_part_id].unit_cost || 0), sub: partMap[h.spare_part_id].sub_account })), [d.hist, partMap]);
+  // Spares cost = unit cost of each part installed in the period, charged to the truck it went on.
+  // Source 1: the install log (spare_part_history). Source 2: the spares table itself, so parts added by the
+  // form or Excel import (which write no log entry) still reach the report. Same part + same date is counted once.
+  const periodStart = `${fromM}-01`, periodEnd = endOfMonth(toM);
+  const spareItems = useMemo(() => {
+    const fromHist = d.hist
+      .filter((h: any) => partMap[h.spare_part_id])
+      .map((h: any) => ({ key: `${h.spare_part_id}|${h.action_date}`, date: h.action_date, truck: h.truck_id || partMap[h.spare_part_id].current_truck_id || null, name: partMap[h.spare_part_id].part_name, cost: Number(partMap[h.spare_part_id].unit_cost || 0), sub: partMap[h.spare_part_id].sub_account }));
+    const seen = new Set(fromHist.map((x: any) => x.key));
+    const fromParts = d.parts
+      .filter((p: any) => p.status === 'in_use' && p.installed_date && p.installed_date >= periodStart && p.installed_date <= periodEnd && !seen.has(`${p.id}|${p.installed_date}`))
+      .map((p: any) => ({ key: `${p.id}|${p.installed_date}`, date: p.installed_date, truck: p.current_truck_id || null, name: `${p.part_name || 'Spare'} ${p.serial_number || ''}`.trim(), cost: Number(p.unit_cost || 0), sub: p.sub_account }));
+    return [...fromHist, ...fromParts];
+  }, [d.hist, d.parts, partMap, periodStart, periodEnd]);
+  // Spares / tyres costed in the period but not linked to a truck: shown so nothing is silently missing
+  const sparesNoTruck = useMemo(() => spareItems.filter((i: any) => !i.truck).reduce((a: number, i: any) => a + i.cost, 0), [spareItems]);
   const tyreItems = useMemo(() => d.tyres.map((t: any) => ({ date: t.fitted_date, truck: t.current_truck_id, name: `${t.brand || 'Tyre'} ${t.serial_number || ''}`.trim(), cost: Number(t.unit_cost || 0), sub: t.sub_account })), [d.tyres]);
 
   const salariesF = useMemo(() => (tdf.driver === 'all' ? d.salaries : d.salaries.filter((x: any) => x.driver_id === tdf.driver)), [d.salaries, tdf.driver]);
@@ -591,6 +603,9 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
           {view === 'maintenance' && (
             <div className="space-y-4">
               <p className="text-sm text-slate-500">Spares, tyres and fuel per truck.</p>
+              {sparesNoTruck > 0 && truck === 'all' && (
+                <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Spares worth <b>{kes(sparesNoTruck)}</b> are marked In Use but have no truck, so they cannot be charged to a truck. Open them in the Spares account and set the truck (the plate must match a truck in the Trucks list).</p>
+              )}
               <Table head={['Truck', 'Spares', 'Tyres', 'Fuel', 'Total']}>
                 {rows.map((r: any) => <tr key={r.id}><td className="font-bold">{r.plate}</td><Num v={r.spares} /><Num v={r.tyres} /><Num v={r.fuel} /><Num v={r.spares + r.tyres + r.fuel} bold /></tr>)}
                 <tr className="bg-slate-50 font-bold"><td>TOTAL</td><Num v={tot.spares || 0} bold /><Num v={tot.tyres || 0} bold /><Num v={tot.fuel || 0} bold /><Num v={(tot.spares || 0) + (tot.tyres || 0) + (tot.fuel || 0)} bold /></tr>
