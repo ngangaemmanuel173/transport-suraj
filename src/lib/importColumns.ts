@@ -15,6 +15,9 @@ export const LONG_TRIP_COLUMNS = [
   'item', 'delivery_no', 'invoice_no', 'trip_amount', 'date_loaded', 'date_delivered',
 ];
 
+// Tarmal: same as PN Mashru but its revenue is not taken from the trips, so no amount column
+export const TARMAL_TRIP_COLUMNS = LONG_TRIP_COLUMNS.filter(c => c !== 'trip_amount');
+
 export const FUEL_COLUMNS = [
   'refuel_date', 'truck_plate', 'trailer_number', 'driver_name', 'departure_point', 'destination',
   'expected_litres', 'actual_litres', 'cost_per_litre', 'total_cost',
