@@ -12,7 +12,7 @@ export const CSL_TRIP_COLUMNS = [
 // Tarmal and PN Mashru share the long-distance trips form.
 export const LONG_TRIP_COLUMNS = [
   'trip_date', 'truck_plate', 'driver_name', 'departure_point', 'destination',
-  'item', 'delivery_no', 'invoice_no', 'date_loaded', 'date_delivered',
+  'item', 'delivery_no', 'invoice_no', 'trip_amount', 'date_loaded', 'date_delivered',
 ];
 
 export const FUEL_COLUMNS = [
