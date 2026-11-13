@@ -11,6 +11,7 @@ import { resolveNamesToIds } from '@/lib/importLookups';
 import { REVENUE_COLUMNS, TRUCK_COST_COLUMNS, COST_ENTRY_COLUMNS, SALARY_COLUMNS } from '@/lib/importColumns';
 import { downloadTemplate, type TemplateName } from '@/lib/templates';
 import { withVat, VAT_MULTIPLIER } from '@/lib/vat';
+import { dayTotals, parseSources, TRIP_NUMS, type McRate } from '@/lib/mclGrid';
 
 /* ------------------------------------------------------------------ */
 /* Reports & Costs                                                     */
@@ -113,7 +114,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   const [toM, setToM] = useState(thisMonth());
   const [truck, setTruck] = useState('all');
   const [loading, setLoading] = useState(true);
-  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], revenueEntries: [], costs: [], salaries: [], truckCosts: [] });
+  const [d, setD] = useState<any>({ vehicles: [], drivers: [], fuel: [], hist: [], parts: [], tyres: [], revenue: [], mclTrips: [], mclRates: [], revenueEntries: [], costs: [], salaries: [], truckCosts: [] });
 
   const effSub = lockedSubAccount ?? sub;
   const tdf = useTruckDriverFilter(effSub);
@@ -135,10 +136,21 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       scope(supabase.from('driver_salaries').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
       scope(supabase.from('truck_costs').select('*').gte('period', start).lte('period', end).order('period', { ascending: false })),
     ]);
+    // MCL revenue is automatic: it comes from the Daily Trip Sheet (weight x rate of each trip's material source)
+    const mclTrips: any[] = [];
+    for (let from = 0; ; from += 1000) {
+      const pg = await supabase.from('mcl_trips').select('vehicle_id, trip_date, notes, ' + TRIP_NUMS.map(n => `trip_${n}`).join(', '))
+        .gte('trip_date', start).lte('trip_date', end).order('trip_date').range(from, from + 999);
+      if (pg.error) { toast(`MCL trips could not load: ${pg.error.message}`, 'error'); break; }
+      mclTrips.push(...((pg.data as any[]) || []));
+      if (!pg.data || pg.data.length < 1000) break;
+    }
+    const mclRatesRes = await supabase.from('mcl_rates').select('*');
+    const mclRates = (mclRatesRes.data || []).map((r: any) => ({ ...r, rate_per_ton: Number(r.rate_per_ton), fuel_litres: Number(r.fuel_litres) }));
     const firstErr = [veh, fuel, hist, parts, tyres, rev, costs, sal, tcs].find((r: any) => r.error) as any;
     if (firstErr) toast(`Some data could not load: ${firstErr.error.message}`, 'error');
     setD({
-      vehicles: veh.data || [], drivers: drv.data || [], fuel: fuel.data || [], hist: hist.data || [], parts: parts.data || [],
+      vehicles: veh.data || [], drivers: drv.data || [], fuel: fuel.data || [], hist: hist.data || [], parts: parts.data || [], mclTrips, mclRates,
       tyres: tyres.data || [], revenue: rev.data || [], revenueEntries: revEnt.data || [], costs: costs.data || [], salaries: sal.data || [], truckCosts: tcs.data || [],
     });
     setLoading(false);
@@ -167,6 +179,27 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
   }, [d.hist, d.parts, partMap, periodStart, periodEnd]);
   // Spares / tyres costed in the period but not linked to a truck: shown so nothing is silently missing
   const sparesNoTruck = useMemo(() => spareItems.filter((i: any) => !i.truck).reduce((a: number, i: any) => a + i.cost, 0), [spareItems]);
+  // MCL auto revenue per truck and month: [{ vehicle_id, month, trips, tons, amount }]
+  const mclAuto = useMemo(() => {
+    const map: Record<string, any> = {};
+    for (const t of d.mclTrips) {
+      const date = String(t.trip_date).slice(0, 10);
+      const weights: Record<number, number> = {};
+      TRIP_NUMS.forEach(n => { weights[n] = Number(t[`trip_${n}`]) || 0; });
+      const tot = dayTotals({ weights, sources: parseSources(t.notes) }, date, d.mclRates as McRate[]);
+      if (!tot.trips) continue;
+      const key = `${t.vehicle_id}|${date.slice(0, 7)}`;
+      const m = map[key] || (map[key] = { vehicle_id: t.vehicle_id, month: date.slice(0, 7), trips: 0, tons: 0, amount: 0 });
+      m.trips += tot.trips; m.tons += tot.tons; m.amount += tot.revenue;
+    }
+    return Object.values(map);
+  }, [d.mclTrips, d.mclRates]);
+  const mclByTruck = useMemo(() => {
+    const o: Record<string, number> = {};
+    for (const m of mclAuto as any[]) o[m.vehicle_id] = (o[m.vehicle_id] || 0) + m.amount;
+    return o;
+  }, [mclAuto]);
+
   const tyreItems = useMemo(() => d.tyres.map((t: any) => ({ date: t.fitted_date, truck: t.current_truck_id, name: `${t.brand || 'Tyre'} ${t.serial_number || ''}`.trim(), cost: Number(t.unit_cost || 0), sub: t.sub_account })), [d.tyres]);
 
   const salariesF = useMemo(() => (tdf.driver === 'all' ? d.salaries : d.salaries.filter((x: any) => x.driver_id === tdf.driver)), [d.salaries, tdf.driver]);
@@ -175,7 +208,8 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
     const trucks = d.vehicles.filter((v: any) => (truck === 'all' || v.id === truck) && tdf.okRow(v.id, null));
     const sum = (arr: any[], key: string, id: string, f: string) => arr.filter(x => x[key] === id).reduce((a, x) => a + Number(x[f] || 0), 0);
     return trucks.map((v: any) => {
-      const revenue = sum(d.revenue, 'vehicle_id', v.id, 'amount');
+      // trucks with MCL trip-sheet revenue use it automatically; others use the Revenue tab entries
+      const revenue = mclByTruck[v.id] ? Math.round(mclByTruck[v.id]) : sum(d.revenue, 'vehicle_id', v.id, 'amount');
       const fuel = sum(d.fuel, 'vehicle_id', v.id, 'total_cost');
       const spares = sum(spareItems, 'truck', v.id, 'cost');
       const tyres = sum(tyreItems, 'truck', v.id, 'cost');
@@ -187,7 +221,7 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
       const cost = fuel + spares + tyres + salaries + other + insurance + loans + allowance;
       return { id: v.id, plate: v.plate_number, sub: v.sub_account, revenue, fuel, spares, tyres, salaries, insurance, loans, allowance, other, cost, profit: revenue - cost };
     });
-  }, [d, truck, spareItems, tyreItems, salariesF, tdf.okRow]);
+  }, [d, truck, spareItems, tyreItems, salariesF, tdf.okRow, mclByTruck]);
 
   const tot = rows.reduce((a: any, r: any) => {
     for (const k of ['revenue', 'fuel', 'spares', 'tyres', 'salaries', 'insurance', 'loans', 'allowance', 'other', 'cost', 'profit']) a[k] = (a[k] || 0) + r[k];
@@ -495,6 +529,14 @@ export function CostReportsPage({ portalColor, lockedSubAccount }: { portalColor
 
           {view === 'revenue' && (
             <div className="space-y-4">
+              <h3 className="text-sm font-bold text-slate-700">Automatic revenue (MCL trip sheets)</h3>
+              <p className="text-xs text-slate-500">Taken live from the MCL Daily Trip Sheet: tons x the shipping rate of each trip's material source. Nothing to enter here; for these trucks it replaces the manual amounts below.</p>
+              <Table head={['Month', 'Truck', 'Trips', 'Tons', 'Revenue']}>
+                {(mclAuto as any[]).filter(m => plate[m.vehicle_id] && (truck === 'all' || m.vehicle_id === truck)).sort((a, b) => b.month.localeCompare(a.month) || String(plate[a.vehicle_id]).localeCompare(String(plate[b.vehicle_id])))
+                  .map(m => <tr key={m.vehicle_id + m.month}><td>{m.month}</td><td className="font-bold">{plate[m.vehicle_id] || '—'}</td><td>{m.trips}</td><td>{m.tons.toFixed(2)}</td><Num v={Math.round(m.amount)} bold /></tr>)}
+                {(mclAuto as any[]).length === 0 && <tr><td colSpan={5} className="text-center text-slate-500">No MCL trips in this period.</td></tr>}
+              </Table>
+              <h3 className="text-sm font-bold text-slate-700">Manual revenue (other sub-accounts)</h3>
               <ImportBar template="truck_revenue" onImport={() => setBulk('revenue')} />
               <EntryForm color={portalColor} onSave={saveRevenue} saving={saving} note={(() => {
                 const amt = Number(ef.amount);
